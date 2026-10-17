@@ -3,7 +3,7 @@
 Convert Altium Designer projects to KiCad 10 from the command line, with an
 Altium importer that is noticeably more faithful than the one in stock KiCad.
 
-This is **KiCad 10.0.7 with 14 importer patches**, built headless (only
+This is **KiCad 10.0.7 with the altium-kicad-compat importer patches** (14 so far), built headless (only
 `kicad-cli` and the schematic/board kifaces), plus a small wrapper that turns
 an Altium `.PrjPcb` into a ready KiCad project folder. It is a stopgap: the
 patches are meant for upstream KiCad, but until (and unless) they are merged
@@ -13,14 +13,25 @@ The output is a plain KiCad 10 project; open it with any KiCad 10.0.x.
 
 ## Usage
 
-Build the image once (about 40 minutes with the default 4 build jobs, a few GB of
+Build the image (about 40 minutes with the default 4 build jobs, a few GB of
 RAM; the image is ~1.3 GB compressed, ~4 GB on disk):
 
 ```bash
-podman build -t altium2kicad -f Containerfile .
+./build.sh
 ```
 
-(`docker build` works the same way; add `--build-arg JOBS=8` to use more cores.)
+`build.sh` is also how to update: whenever the patches change, run it again.
+It syncs `patches/` with `../altium-kicad-compat/kicad-patches` (every
+`NNNN-*.patch`: new ones added, changed ones replaced, removed ones deleted),
+builds the image with podman or docker, smoke-tests it, and tags it
+`altium2kicad:latest` and `altium2kicad:patches-<hash of the patch set>`. Then
+commit `patches/`. Options: `--no-sync` builds from the committed `patches/`
+(as CI does), `--patches DIR` syncs from another folder, `JOBS=8 ./build.sh`
+compiles with more cores. Any change to the patches recompiles KiCad from
+scratch.
+
+Without the script: `podman build -t altium2kicad -f Containerfile .`
+(or `docker build`).
 
 Convert a project:
 
@@ -152,7 +163,9 @@ redistributing the image must keep them available as GPL-3.0 §6 requires.
   Linux Archive snapshot (`ARCH_SNAPSHOT`), so a rebuild resolves the same
   library versions. `--build-arg ARCH_SNAPSHOT=` uses the live mirrors.
 - KiCad is cloned shallowly at the tag, the commit hash is checked, and the
-  patches are applied in order with `git apply`.
+  patches are applied with `git apply`: every `patches/NNNN-*.patch`, in sorted
+  order, so a new patch only needs a new number. `SOURCE.txt` in the image lists
+  the applied patches with their SHA-256.
 - Only `kicad-cli`, `_eeschema.kiface` and `_pcbnew.kiface` (and their shared
   libraries) are built: no GUI programs, QA tests, wxPython or translations.
   They are installed by hand under `/opt/kicad-altium`, because `ninja install`

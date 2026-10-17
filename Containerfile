@@ -36,8 +36,12 @@ RUN git clone --depth 1 --branch "${KICAD_TAG}" https://gitlab.com/kicad/code/ki
     && test "$(git -C kicad rev-parse HEAD)" = "${KICAD_COMMIT}"
 
 COPY patches/ /src/patches/
-RUN cd kicad && for p in /src/patches/*.patch; do \
-        echo "applying ${p##*/}"; git apply --whitespace=nowarn "$p" || exit 1; done
+# Every NNNN-*.patch, in byte order; anything else in patches/ is ignored.
+RUN set -e; cd kicad; export LC_ALL=C; \
+    set -- /src/patches/[0-9][0-9][0-9][0-9]-*.patch; \
+    [ -e "$1" ] || { echo "no NNNN-*.patch in patches/" >&2; exit 1; }; \
+    for p in "$@"; do echo "applying ${p##*/}"; git apply --whitespace=nowarn "$p"; done; \
+    (cd /src/patches && sha256sum [0-9][0-9][0-9][0-9]-*.patch) > /src/patches.sha256
 
 ARG PREFIX=/opt/kicad-altium
 ARG JOBS=4
@@ -69,7 +73,8 @@ RUN set -e; S=/install${PREFIX}/share/doc/altium2kicad; mkdir -p $S; \
     cp -r /src/patches $S/; \
     tar -C /src --exclude=.git -cJf $S/kicad-${KICAD_TAG}-altium2kicad-source.tar.xz kicad; \
     { echo "KiCad ${KICAD_TAG} (${KICAD_COMMIT}) from https://gitlab.com/kicad/code/kicad.git"; \
-      echo "with patches/*.patch applied in order. Built with:"; \
+      echo "with these patches applied in this order (sha256):"; cat /src/patches.sha256; \
+      echo "Built with:"; \
       grep -E '^(CMAKE_BUILD_TYPE|KICAD_[A-Z_0-9]+):' build/CMakeCache.txt; } > $S/SOURCE.txt; \
     cp kicad/LICENSE* kicad/AUTHORS.txt $S/
 
