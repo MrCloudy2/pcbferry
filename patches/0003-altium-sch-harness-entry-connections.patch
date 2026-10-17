@@ -1,0 +1,306 @@
+diff --git a/eeschema/sch_io/altium/sch_io_altium.cpp b/eeschema/sch_io/altium/sch_io_altium.cpp
+index c0e93441..d4f6c31f 100644
+--- a/eeschema/sch_io/altium/sch_io_altium.cpp
++++ b/eeschema/sch_io/altium/sch_io_altium.cpp
+@@ -871,8 +871,9 @@ void SCH_IO_ALTIUM::CreateAliases()
+         }
+     }
+ 
+-    std::function<SCH_LABEL*(VECTOR2I, std::set<SCH_LINE*>&)> walkBusLine =
+-            [&]( const VECTOR2I& aStart, std::set<SCH_LINE*>& aVisited ) -> SCH_LABEL*
++    std::function<SCH_LABEL_BASE*( VECTOR2I, std::set<SCH_LINE*>&, KICAD_T )> walkBusLine =
++            [&]( const VECTOR2I& aStart, std::set<SCH_LINE*>& aVisited,
++                 KICAD_T aLabelType ) -> SCH_LABEL_BASE*
+             {
+                 auto it = busLineMap.find( aStart );
+ 
+@@ -887,15 +888,20 @@ void SCH_IO_ALTIUM::CreateAliases()
+ 
+                     aVisited.insert( line );
+ 
+-                    for( SCH_ITEM* elem : screen->Items().Overlapping( SCH_LABEL_T, line->GetBoundingBox() ) )
++                    for( SCH_ITEM* elem : screen->Items().Overlapping( aLabelType, line->GetBoundingBox() ) )
+                     {
+-                        SCH_LABEL* label = static_cast<SCH_LABEL*>( elem );
++                        SCH_LABEL_BASE* label = static_cast<SCH_LABEL_BASE*>( elem );
++
++                        // Vector labels name a member's own sub-bus, never the harness
++                        if( label->GetText().Contains( wxT( "[" ) ) )
++                            continue;
+ 
+                         if( line->HitTest( label->GetPosition() ) )
+                             return label;
+                     }
+ 
+-                    SCH_LABEL* result = walkBusLine( KIGEOM::GetOtherEnd( line->GetSeg(), aStart ), aVisited );
++                    SCH_LABEL_BASE* result = walkBusLine( KIGEOM::GetOtherEnd( line->GetSeg(), aStart ),
++                                                          aVisited, aLabelType );
+ 
+                     if( result )
+                         return result;
+@@ -904,6 +910,9 @@ void SCH_IO_ALTIUM::CreateAliases()
+                 return nullptr;
+             };
+ 
++    // Harnesses with no name of their own, per type, to keep their member nets apart.
++    std::map<wxString, int> unnamedHarnesses;
++
+     for( auto& [_, harness] : m_altiumHarnesses )
+     {
+         std::shared_ptr<BUS_ALIAS> alias = std::make_shared<BUS_ALIAS>();
+@@ -970,20 +979,50 @@ void SCH_IO_ALTIUM::CreateAliases()
+         if( !busLine )
+             continue;
+ 
++        // A port on the harness bus drives it (hierarchical labels outrank local ones), so look
++        // for one first, then for a net label.
+         std::set<SCH_LINE*> visited;
+-        SCH_LABEL* label = walkBusLine( pos, visited );
++        SCH_LABEL_BASE*     label = walkBusLine( pos, visited, SCH_HIER_LABEL_T );
++
++        if( label && !label->GetText().Contains( wxT( "{" ) ) )
++            label = nullptr;
++
++        if( !label )
++        {
++            visited.clear();
++            label = walkBusLine( pos, visited, SCH_LABEL_T );
++
++            // Only a plain net label names the harness; an existing group label does not say
++            // which prefix the members carry.
++            if( label && label->GetText().Contains( wxT( "{" ) ) )
++                label = nullptr;
++        }
+ 
+         // Altium supports two different naming conventions for harnesses.  If there is a specific
+         // harness name, then the nets inside the harness will be named harnessname.netname.
+         // However, if there is no harness name, the nets will be named just netname.
+ 
+         // KiCad bus labels need some special handling to be recognized as bus labels
+-        if( label && !label->GetText().StartsWith( wxT( "{" ) ) )
++        if( label && !label->GetText().Contains( wxT( "{" ) ) )
+             label->SetText( label->GetText() + wxT( "{" ) + harness.m_name + wxT( "}" ) );
+ 
++        // The group prefix becomes the prefix of every member net.
++        wxString prefix;
++
++        if( label )
++            prefix = label->GetText().BeforeFirst( '{' );
++
+         if( !label )
+         {
+-            label = new SCH_LABEL( busLine->GetStartPoint(), wxT( "{" ) + harness.m_name + wxT( "}" ) );
++            // Name the group after the harness type so its members are TYPE.member, the names
++            // Altium gives them; a second unnamed harness of the same type on this sheet gets
++            // TYPE_2 so the two stay apart.
++            int count = ++unnamedHarnesses[harness.m_name];
++            prefix = count == 1 ? harness.m_name
++                                : wxString::Format( wxT( "%s_%d" ), harness.m_name, count );
++
++            label = new SCH_LABEL( busLine->GetStartPoint(),
++                                   prefix + wxT( "{" ) + harness.m_name + wxT( "}" ) );
+             label->SetVertJustify( GR_TEXT_V_ALIGN_BOTTOM );
+ 
+             if( busLine->GetEndPoint().x < busLine->GetStartPoint().x )
+@@ -994,6 +1033,62 @@ void SCH_IO_ALTIUM::CreateAliases()
+             screen->Append( label );
+         }
+ 
++        // Altium joins the wire at a harness entry to the harness by position alone. KiCad joins
++        // a wire to a bus member by name, so name each entry wire after its member net,
++        // prefix.member: two harnesses on one sheet can share member names. Vector members
++        // carry their own bus labels and are left alone.
++        for( const HARNESS::HARNESS_PORT& port : harness.m_ports )
++        {
++            if( port.m_name.Contains( wxT( "[" ) ) )
++                continue;
++
++            // Put the label a little way along the entry's wire rather than on its end: a signal
++            // harness drawn along the connector edge would otherwise share that point and tie
++            // every entry wire to it.
++            VECTOR2I labelPos = port.m_location;
++
++            for( SCH_ITEM* item : screen->Items().Overlapping( SCH_LINE_T, port.m_location ) )
++            {
++                SCH_LINE* wire = static_cast<SCH_LINE*>( item );
++
++                if( !wire->IsWire() )
++                    continue;
++
++                VECTOR2I farEnd;
++
++                if( wire->GetStartPoint() == port.m_location )
++                    farEnd = wire->GetEndPoint();
++                else if( wire->GetEndPoint() == port.m_location )
++                    farEnd = wire->GetStartPoint();
++                else
++                    continue;
++
++                VECTOR2I along = farEnd - port.m_location;
++                int      step = std::min<int>( along.EuclideanNorm() / 2,
++                                               schIUScale.MilsToIU( 50 ) );
++
++                labelPos = port.m_location + along.Resize( step );
++                break;
++            }
++
++            SCH_LABEL* entryLabel = new SCH_LABEL( labelPos, prefix.IsEmpty()
++                                                                 ? port.m_name
++                                                                 : prefix + wxT( "." ) + port.m_name );
++
++            switch( port.m_harnessConnectorSide )
++            {
++            default:
++            case ASCH_SHEET_ENTRY_SIDE::LEFT:   entryLabel->SetSpinStyle( SPIN_STYLE::LEFT );   break;
++            case ASCH_SHEET_ENTRY_SIDE::RIGHT:  entryLabel->SetSpinStyle( SPIN_STYLE::RIGHT );  break;
++            case ASCH_SHEET_ENTRY_SIDE::TOP:    entryLabel->SetSpinStyle( SPIN_STYLE::UP );     break;
++            case ASCH_SHEET_ENTRY_SIDE::BOTTOM: entryLabel->SetSpinStyle( SPIN_STYLE::BOTTOM ); break;
++            }
++
++            entryLabel->SetFlags( IS_NEW );
++            screen->Append( entryLabel );
++            m_harnessEntryLabels.insert( entryLabel );
++        }
++
+         // Draw the bus line from the individual ports to the harness
+ 
+         bool isVertical = true;
+@@ -1128,15 +1223,80 @@ void SCH_IO_ALTIUM::PostProcessBusLabels()
+     if( !hasBusLines )
+         return;
+ 
++    // The harness type ("TYPE" of a "NAME{TYPE}" sheet pin or port) carried by the bus that
++    // aStart belongs to, or empty if it carries none.
++    auto harnessTypeOnBus =
++            [&]( SCH_LINE* aStart ) -> wxString
++            {
++                auto typeOf = []( const wxString& aText ) -> wxString
++                {
++                    if( aText.StartsWith( wxT( "{" ) ) || !aText.EndsWith( wxT( "}" ) ) )
++                        return wxEmptyString;
++
++                    wxString type = aText.AfterFirst( '{' ).BeforeLast( '}' );
++                    return type.Contains( wxT( "{" ) ) ? wxString() : type;
++                };
++
++                std::set<SCH_LINE*>    visited = { aStart };
++                std::vector<SCH_LINE*> todo = { aStart };
++
++                while( !todo.empty() )
++                {
++                    SCH_LINE* line = todo.back();
++                    todo.pop_back();
++
++                    for( SCH_ITEM* item : screen->Items().Overlapping( line->GetBoundingBox() ) )
++                    {
++                        if( item->Type() == SCH_LINE_T )
++                        {
++                            SCH_LINE* other = static_cast<SCH_LINE*>( item );
++
++                            if( other->IsBus() && !visited.contains( other )
++                                && ( line->HitTest( other->GetStartPoint() )
++                                     || line->HitTest( other->GetEndPoint() )
++                                     || other->HitTest( line->GetStartPoint() )
++                                     || other->HitTest( line->GetEndPoint() ) ) )
++                            {
++                                visited.insert( other );
++                                todo.push_back( other );
++                            }
++                        }
++                        else if( item->Type() == SCH_HIER_LABEL_T )
++                        {
++                            SCH_HIERLABEL* port = static_cast<SCH_HIERLABEL*>( item );
++
++                            if( line->HitTest( port->GetPosition() ) )
++                            {
++                                if( wxString type = typeOf( port->GetText() ); !type.IsEmpty() )
++                                    return type;
++                            }
++                        }
++                        else if( item->Type() == SCH_SHEET_T )
++                        {
++                            for( SCH_SHEET_PIN* pin : static_cast<SCH_SHEET*>( item )->GetPins() )
++                            {
++                                if( !line->HitTest( pin->GetPosition() ) )
++                                    continue;
++
++                                if( wxString type = typeOf( pin->GetText() ); !type.IsEmpty() )
++                                    return type;
++                            }
++                        }
++                    }
++                }
++
++                return wxEmptyString;
++            };
++
+     // Collect labels that need wrapping, then modify them after iteration to avoid
+     // modifying the R-tree during traversal.
+-    std::vector<SCH_LABEL*> labelsToWrap;
++    std::vector<std::pair<SCH_LABEL*, wxString>> labelsToWrap;
+ 
+     for( SCH_ITEM* item : screen->Items().OfType( SCH_LABEL_T ) )
+     {
+         SCH_LABEL* label = static_cast<SCH_LABEL*>( item );
+ 
+-        if( SCH_CONNECTION::IsBusLabel( label->GetText() ) )
++        if( SCH_CONNECTION::IsBusLabel( label->GetText() ) || m_harnessEntryLabels.contains( label ) )
+             continue;
+ 
+         for( SCH_ITEM* busItem : screen->Items().Overlapping( SCH_LINE_T, label->GetBoundingBox() ) )
+@@ -1145,14 +1305,20 @@ void SCH_IO_ALTIUM::PostProcessBusLabels()
+ 
+             if( busLine->IsBus() && busLine->HitTest( label->GetPosition() ) )
+             {
+-                labelsToWrap.push_back( label );
++                labelsToWrap.emplace_back( label, harnessTypeOnBus( busLine ) );
+                 break;
+             }
+         }
+     }
+ 
+-    for( SCH_LABEL* label : labelsToWrap )
+-        label->SetText( AltiumWrapBusLabel( label->GetText() ) );
++    for( auto& [label, harnessType] : labelsToWrap )
++    {
++        // A net label on a signal harness names the harness: its nets become NAME.member.
++        if( !harnessType.IsEmpty() )
++            label->SetText( label->GetText() + wxT( "{" ) + harnessType + wxT( "}" ) );
++        else
++            label->SetText( AltiumWrapBusLabel( label->GetText() ) );
++    }
+ }
+ 
+ 
+diff --git a/eeschema/sch_io/altium/sch_io_altium.h b/eeschema/sch_io/altium/sch_io_altium.h
+index 38134cd0..c8f43e57 100644
+--- a/eeschema/sch_io/altium/sch_io_altium.h
++++ b/eeschema/sch_io/altium/sch_io_altium.h
+@@ -26,6 +26,7 @@
+ #define _SCH_IO_ALTIUM_H_
+ 
+ #include <memory>
++#include <set>
+ #include <sch_sheet_path.h>
+ #include <vector>
+ #include <sch_io/sch_io.h>
+@@ -72,6 +73,8 @@ struct HARNESS
+ };
+ 
+ 
++class SCH_LABEL;
++
+ class SCH_IO_ALTIUM : public SCH_IO
+ {
+ public:
+@@ -254,6 +257,10 @@ private:
+     std::vector<ASCH_PORT>             m_altiumHarnessPortsCurrentSheet;
+     std::map<int, HARNESS>             m_altiumHarnesses;
+ 
++    // Labels naming the wires at harness entries. They may sit on a bus line drawn along the
++    // connector edge, but are wire labels and must not be wrapped as bus labels.
++    std::set<SCH_LABEL*> m_harnessEntryLabels;
++
+     // What the parsed sheets contain; resolves an "Automatic" net identifier scope.
+     bool m_sawSheetEntries = false;
+     bool m_sawPorts = false;

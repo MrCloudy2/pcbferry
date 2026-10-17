@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+"""Convert an Altium project (.PrjPcb), schematic (.SchDoc) or board (.PcbDoc)
+into a KiCad project folder, using a kicad-cli built with the altium2kicad
+patches (`sch import`, and a `pcb import` that keeps design rules).
+
+    altium2kicad Board.PrjPcb out/
+    altium2kicad --check Board.PrjPcb out/
+
+The output folder gets NAME.kicad_pro, NAME.kicad_sch (+ sub-sheets),
+NAME.kicad_pcb and import-reports/ with kicad-cli's JSON reports plus a
+summary.json. Exit status is non-zero if any step fails.
+"""
+
+import argparse
+import configparser
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+__version__ = "0.1.0"
+
+KICAD_CLI = os.environ.get("KICAD_CLI", "kicad-cli")
+UNLINKED_SYMBOL = "No library symbol found for schematic symbol"
+
+
+def log(msg: str) -> None:
+    print(f"altium2kicad: {msg}", file=sys.stderr)
+
+
+def find_case_insensitive(base: Path, rel: str) -> Path | None:
+    """.PrjPcb paths come from Windows, where case doesn't matter."""
+    path = base
+    for part in Path(rel.replace("\\", "/")).parts:
+        if part == "..":
+            path = path.parent
+            continue
+        if not path.is_dir():
+            return None
+        match = next((p for p in path.iterdir() if p.name.lower() == part.lower()), None)
+        if match is None:
+            return None
+        path = match
+    return path if path.is_file() else None
+
+
+def project_documents(prjpcb: Path) -> list[Path]:
+    raw = prjpcb.read_bytes()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:  # older Altium writes the Windows code page
+        text = raw.decode("latin-1")
+    parser = configparser.ConfigParser(interpolation=None, strict=False)
+    parser.optionxform = str
+    parser.read_string(text)
+    docs = []
+    for section in parser.sections():
+        if section.startswith("Document"):
+            rel = parser[section].get("DocumentPath", "")
+            path = find_case_insensitive(prjpcb.parent, rel) if rel else None
+            if path:
+                docs.append(path)
+            elif rel:
+                log(f"warning: {prjpcb.name} lists {rel}, which was not found")
+    return docs
+
+
+def run(cmd: list[str]) -> subprocess.CompletedProcess:
+    log("$ " + " ".join(cmd))
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    # kicad-cli prints progress on stdout and wx noise on stderr; keep both visible.
+    for stream in (result.stdout, result.stderr):
+        for line in stream.splitlines():
+            if line.strip():
+                print(f"  {line}", file=sys.stderr)
+    return result
+
+
+def read_report(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def messages(report: dict, key: str) -> list[str]:
+    out = []
+    for item in report.get(key, []) or []:
+        out.append(str(item.get("message") or item) if isinstance(item, dict) else str(item))
+    return out
+
+
+def import_step(kind: str, src: Path, dest: Path, reports: Path, summary: dict) -> bool:
+    report = reports / f"{kind}-import.json"
+    cmd = [KICAD_CLI, kind, "import", "--format", "altium", "--report-format", "json",
+           "--report-file", str(report), "--output", str(dest), str(src)]
+    result = run(cmd)
+    data = read_report(report)
+    ok = result.returncode == 0 and dest.exists()
+    errors = messages(data, "errors")
+    # Every imported symbol is reported as an error because no KiCad library
+    # holds it; the symbols are embedded in the .kicad_sch, so this is expected.
+    unlinked = [e for e in errors if e.startswith(UNLINKED_SYMBOL)]
+    summary["steps"].append({
+        "step": f"{kind} import", "input": str(src), "output": str(dest),
+        "exit_code": result.returncode, "ok": ok,
+        "errors": [e for e in errors if not e.startswith(UNLINKED_SYMBOL)],
+        "warnings": messages(data, "warnings"),
+        "symbols_without_library": len(unlinked),
+        "report": str(report.relative_to(reports.parent)) if report.exists() else None,
+    })
+    if not ok:
+        log(f"error: {kind} import of {src.name} failed (exit {result.returncode})")
+    return ok
+
+
+def check_step(name: str, cmd: list[str], output: Path, summary: dict, parse=None) -> bool:
+    result = run(cmd)
+    ok = result.returncode == 0 and output.exists()
+    entry = {"step": name, "exit_code": result.returncode, "ok": ok,
+             "output": str(output)}
+    if ok and parse:
+        entry.update(parse(output))
+    summary["steps"].append(entry)
+    if not ok:
+        log(f"error: {name} failed (exit {result.returncode})")
+    return ok
+
+
+def drc_counts(path: Path) -> dict:
+    data = read_report(path)
+    return {"violations": len(data.get("violations", [])),
+            "unconnected_items": len(data.get("unconnected_items", [])),
+            "schematic_parity": len(data.get("schematic_parity", []))}
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(
+        prog="altium2kicad",
+        description="Convert an Altium .PrjPcb/.SchDoc/.PcbDoc into a KiCad project.")
+    ap.add_argument("input", type=Path, help=".PrjPcb, .SchDoc or .PcbDoc")
+    ap.add_argument("output", type=Path, help="output folder (created; must be empty unless --force)")
+    ap.add_argument("--name", help="KiCad project name (default: input file name)")
+    ap.add_argument("--board", type=Path,
+                    help="PcbDoc to use when a project lists several (default: the first)")
+    ap.add_argument("--check", action="store_true",
+                    help="afterwards, reopen the result: export a netlist and run DRC")
+    ap.add_argument("--force", action="store_true", help="write into a non-empty output folder")
+    ap.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    args = ap.parse_args(argv)
+
+    src = args.input.resolve()
+    if not src.is_file():
+        ap.error(f"{args.input}: no such file")
+    suffix = src.suffix.lower()
+    if suffix not in (".prjpcb", ".schdoc", ".pcbdoc"):
+        ap.error(f"{args.input}: expected a .PrjPcb, .SchDoc or .PcbDoc")
+    if shutil.which(KICAD_CLI) is None and not Path(KICAD_CLI).is_file():
+        log(f"error: {KICAD_CLI} not found (set KICAD_CLI)")
+        return 2
+
+    out = args.output.resolve()
+    if out.exists() and any(out.iterdir()) and not args.force:
+        log(f"error: {out} is not empty (use --force to write into it)")
+        return 2
+    reports = out / "import-reports"
+    reports.mkdir(parents=True, exist_ok=True)
+
+    name = args.name or src.stem
+    sch_src = pcb_src = None
+    if suffix == ".prjpcb":
+        docs = project_documents(src)
+        if any(d.suffix.lower() == ".schdoc" for d in docs):
+            sch_src = src  # import the whole project: flat designs, variants
+        boards = [d for d in docs if d.suffix.lower() == ".pcbdoc"]
+        if args.board:
+            pcb_src = args.board.resolve()
+        elif boards:
+            pcb_src = boards[0]
+            if len(boards) > 1:
+                log(f"warning: project lists {len(boards)} boards; converting {pcb_src.name} "
+                    f"(choose another with --board)")
+        if not sch_src and not pcb_src:
+            log(f"error: {src.name} lists no SchDoc or PcbDoc that exists")
+            return 1
+    elif suffix == ".schdoc":
+        sch_src = src
+    else:
+        pcb_src = src
+
+    summary = {"tool": f"altium2kicad {__version__}", "input": str(src), "output": str(out),
+               "project": name, "steps": []}
+    kicad_sch = out / f"{name}.kicad_sch"
+    kicad_pcb = out / f"{name}.kicad_pcb"
+    ok = True
+    # Schematic first: it writes NAME.kicad_pro, which the board import then
+    # loads and adds its design rules and netclasses to.
+    if sch_src:
+        ok &= import_step("sch", sch_src, kicad_sch, reports, summary)
+    if pcb_src:
+        ok &= import_step("pcb", pcb_src, kicad_pcb, reports, summary)
+
+    if args.check and ok:
+        if sch_src:
+            net = reports / f"{name}.net"
+            ok &= check_step("sch export netlist",
+                             [KICAD_CLI, "sch", "export", "netlist", "-o", str(net), str(kicad_sch)],
+                             net, summary)
+        if pcb_src:
+            drc = reports / "drc.json"
+            cmd = [KICAD_CLI, "pcb", "drc", "--format", "json", "-o", str(drc)]
+            if sch_src:
+                cmd.append("--schematic-parity")
+            ok &= check_step("pcb drc", cmd + [str(kicad_pcb)], drc, summary, drc_counts)
+
+    summary["ok"] = bool(ok)
+    (reports / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+
+    warnings = sum(len(s.get("warnings", [])) for s in summary["steps"])
+    errors = sum(len(s.get("errors", [])) for s in summary["steps"])
+    status = "done" if ok else "FAILED"
+    log(f"{status}: {out} ({warnings} warnings, {errors} errors; see "
+        f"{reports.relative_to(out.parent)}/summary.json)")
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

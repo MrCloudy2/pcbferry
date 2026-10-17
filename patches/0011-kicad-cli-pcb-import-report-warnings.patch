@@ -1,0 +1,97 @@
+diff --git a/pcbnew/pcbnew_jobs_handler.cpp b/pcbnew/pcbnew_jobs_handler.cpp
+index 4135bc83..2b6addb2 100644
+--- a/pcbnew/pcbnew_jobs_handler.cpp
++++ b/pcbnew/pcbnew_jobs_handler.cpp
+@@ -2788,6 +2788,32 @@ void PCBNEW_JOBS_HANDLER::loadOverrideDrawingSheet( BOARD* aBrd, const wxString&
+ }
+ 
+ 
++namespace
++{
++/**
++ * Keeps each message an importer reports, so they can go into the import report.
++ */
++class IMPORT_MESSAGE_COLLECTOR : public REPORTER
++{
++public:
++    REPORTER& Report( const wxString& aText, SEVERITY aSeverity = RPT_SEVERITY_UNDEFINED ) override
++    {
++        REPORTER::Report( aText, aSeverity );
++
++        wxString text = aText;
++        text.Trim( true ).Trim( false );
++
++        if( !text.IsEmpty() )
++            m_messages.emplace_back( text, aSeverity );
++
++        return *this;
++    }
++
++    std::vector<std::pair<wxString, SEVERITY>> m_messages;
++};
++} // namespace
++
++
+ int PCBNEW_JOBS_HANDLER::JobImport( JOB* aJob )
+ {
+     JOB_PCB_IMPORT* job = dynamic_cast<JOB_PCB_IMPORT*>( aJob );
+@@ -2863,6 +2889,11 @@ int PCBNEW_JOBS_HANDLER::JobImport( JOB* aJob )
+     BOARD* board = nullptr;
+     wxString formatName = PCB_IO_MGR::ShowType( fileType );
+     std::vector<wxString> warnings;
++    std::vector<wxString> errors;
++
++    // The importer's own messages (unsupported objects, dropped data) belong in the report.
++    IMPORT_MESSAGE_COLLECTOR importMessages;
++    LOAD_INFO_REPORTER_SCOPE loadInfoScope( &importMessages );
+ 
+     try
+     {
+@@ -2880,8 +2911,17 @@ int PCBNEW_JOBS_HANDLER::JobImport( JOB* aJob )
+                                               job->m_inputFile, formatName ),
+                             RPT_SEVERITY_INFO );
+ 
++        pi->SetReporter( &importMessages );
+         board = pi->LoadBoard( job->m_inputFile, nullptr, nullptr, nullptr );
+ 
++        for( const auto& [text, severity] : importMessages.m_messages )
++        {
++            if( severity == RPT_SEVERITY_ERROR )
++                errors.push_back( text );
++            else if( severity == RPT_SEVERITY_WARNING )
++                warnings.push_back( text );
++        }
++
+         if( !board )
+         {
+             m_reporter->Report( _( "Failed to load board\n" ), RPT_SEVERITY_ERROR );
+@@ -2950,8 +2990,13 @@ int PCBNEW_JOBS_HANDLER::JobImport( JOB* aJob )
+                 for( const wxString& warning : warnings )
+                     warningsJson.push_back( warning.ToStdString() );
+ 
++                nlohmann::json errorsJson = nlohmann::json::array();
++
++                for( const wxString& error : errors )
++                    errorsJson.push_back( error.ToStdString() );
++
+                 report["warnings"] = warningsJson;
+-                report["errors"] = nlohmann::json::array();
++                report["errors"] = errorsJson;
+ 
+                 wxString reportOutput = wxString::FromUTF8( report.dump( 2 ) );
+ 
+@@ -2985,6 +3030,14 @@ int PCBNEW_JOBS_HANDLER::JobImport( JOB* aJob )
+                 text += wxString::Format( wxS( "  Vias: %zu\n" ), viaCount );
+                 text += wxString::Format( wxS( "  Zones: %zu\n" ), zoneCount );
+ 
++                if( !errors.empty() )
++                {
++                    text += wxS( "\nErrors:\n" );
++
++                    for( const wxString& error : errors )
++                        text += wxString::Format( wxS( "  - %s\n" ), error );
++                }
++
+                 if( !warnings.empty() )
+                 {
+                     text += wxS( "\nWarnings:\n" );

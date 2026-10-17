@@ -1,0 +1,72 @@
+# Builds the altium2kicad image; on a v* tag also pushes it to GHCR and
+# attaches the corresponding source (patched KiCad tree + patches) to a release.
+name: image
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # release assets on tags
+  packages: write   # ghcr.io push on tags
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/altium2kicad
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space (KiCad build needs ~10 GB)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile
+          load: true
+          tags: altium2kicad:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test
+        run: |
+          docker run --rm --entrypoint kicad-cli altium2kicad:ci version
+          docker run --rm --entrypoint kicad-cli altium2kicad:ci sch import --help
+          docker run --rm altium2kicad:ci --version
+
+      - name: Extract corresponding source
+        run: |
+          id=$(docker create altium2kicad:ci)
+          docker cp "$id:/opt/kicad-altium/share/doc/altium2kicad" source
+          docker rm "$id"
+          ls -l source
+
+      - name: Push to GHCR
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          for tag in "${GITHUB_REF_NAME}" latest; do
+            docker tag altium2kicad:ci "$IMAGE:$tag"
+            docker push "$IMAGE:$tag"
+          done
+
+      - name: Release with source
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tar -C source -czf altium2kicad-patches.tar.gz patches SOURCE.txt
+          gh release create "$GITHUB_REF_NAME" --generate-notes \
+            source/kicad-*-altium2kicad-source.tar.xz altium2kicad-patches.tar.gz

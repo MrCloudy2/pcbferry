@@ -1,0 +1,79 @@
+diff --git a/eeschema/sch_io/altium/sch_io_altium.cpp b/eeschema/sch_io/altium/sch_io_altium.cpp
+index 25b90dee..b38b0265 100644
+--- a/eeschema/sch_io/altium/sch_io_altium.cpp
++++ b/eeschema/sch_io/altium/sch_io_altium.cpp
+@@ -445,6 +445,12 @@ SCH_SHEET* SCH_IO_ALTIUM::LoadSchematicProject( SCHEMATIC* aSchematic, const std
+         SCH_SCREEN* screen = new SCH_SCREEN( m_schematic );
+         sheet->SetScreen( screen );
+ 
++        // As for single-file imports, the sheet takes its screen's UUID before anything is
++        // parsed into it. A saved top-level sheet is identified by its file's UUID, so symbol
++        // instance paths recorded under any other UUID don't resolve when the project is opened,
++        // which loses the per-channel references of sheets used more than once.
++        const_cast<KIID&>( sheet->m_Uuid ) = screen->GetUuid();
++
+         // Convert to KiCad project-relative path with .kicad_sch extension
+         kicad_fn.SetExt( FILEEXT::KiCadSchematicFileExtension );
+         kicad_fn.SetPath( aSchematic->Project().GetProjectPath() );
+@@ -1665,6 +1671,7 @@ void SCH_IO_ALTIUM::NormalizeRepeatedSheetInstances()
+                 .push_back( sheetPath );
+     }
+ 
++
+     for( auto& [groupKey, sheetPaths] : pathsByFile )
+     {
+         if( sheetPaths.size() < 2 )
+@@ -1798,15 +1805,23 @@ void SCH_IO_ALTIUM::ParseAltiumSch( const wxString& aFileName )
+             continue;
+         }
+ 
+-        m_rootSheet->SearchHierarchy( loadAltiumFileName.GetFullPath(), &loadedScreen );
++        // A loaded sheet's screen carries the KiCad file name it will be saved as, so look the
++        // file up under that name. Searching for the Altium file name never matched, and a
++        // sheet used by several sheet symbols (an Altium multichannel design) was parsed again
++        // for each, leaving each channel on its own screen with one symbol instance; saved under
++        // the same file name, only the last channel survived.
++        wxFileName projectFileName = loadAltiumFileName;
++        projectFileName.SetPath( m_schematic->Project().GetProjectPath() );
++        projectFileName.SetExt( FILEEXT::KiCadSchematicFileExtension );
++
++        if( auto it = m_loadedScreens.find( projectFileName.GetFullPath() ); it != m_loadedScreens.end() )
++            loadedScreen = it->second;
++        else
++            m_rootSheet->SearchHierarchy( projectFileName.GetFullPath(), &loadedScreen );
+ 
+         if( loadedScreen )
+         {
+             sheet->SetScreen( loadedScreen );
+-
+-            wxFileName projectFileName = loadAltiumFileName;
+-            projectFileName.SetPath( m_schematic->Project().GetProjectPath() );
+-            projectFileName.SetExt( FILEEXT::KiCadSchematicFileExtension );
+             sheet->SetFileName( projectFileName.GetFullName() );
+ 
+             // Do not need to load the sub-sheets - this has already been done.
+@@ -1848,11 +1863,9 @@ void SCH_IO_ALTIUM::ParseAltiumSch( const wxString& aFileName )
+             ParseAltiumSch( loadAltiumFileName.GetFullPath() );
+ 
+             // Map the loaded Altium file to the project file.
+-            wxFileName projectFileName = loadAltiumFileName;
+-            projectFileName.SetPath( m_schematic->Project().GetProjectPath() );
+-            projectFileName.SetExt( FILEEXT::KiCadSchematicFileExtension );
+             sheet->SetFileName( projectFileName.GetFullName() );
+             screen->SetFileName( projectFileName.GetFullPath() );
++            m_loadedScreens[projectFileName.GetFullPath()] = screen;
+ 
+             m_sheetPath.pop_back();
+         }
+diff --git a/eeschema/sch_io/altium/sch_io_altium.h b/eeschema/sch_io/altium/sch_io_altium.h
+index 7cc6ed87..3115ec20 100644
+--- a/eeschema/sch_io/altium/sch_io_altium.h
++++ b/eeschema/sch_io/altium/sch_io_altium.h
+@@ -243,6 +243,7 @@ private:
+     std::unique_ptr<ASCH_SHEET>        m_altiumSheet;
+     std::map<int, SCH_SYMBOL*>         m_symbols;
+     std::map<int, SCH_PIN*>            m_pinsByRecord;      // schematic pins by record index
++    std::map<wxString, SCH_SCREEN*>    m_loadedScreens;     // sub-sheet screens by KiCad file name
+     std::map<int, SCH_SHEET*>          m_sheets;
+     std::map<int, LIB_SYMBOL*>         m_libSymbols;        // every symbol has its unique lib_symbol
+ 

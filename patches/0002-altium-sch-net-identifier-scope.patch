@@ -1,0 +1,188 @@
+diff --git a/common/io/altium/altium_project_variants.cpp b/common/io/altium/altium_project_variants.cpp
+index 2374076c..b67137ec 100644
+--- a/common/io/altium/altium_project_variants.cpp
++++ b/common/io/altium/altium_project_variants.cpp
+@@ -172,6 +172,24 @@ std::map<wxString, wxString> ParseAltiumProjectParameters( const wxString& aPrjP
+ }
+ 
+ 
++ALTIUM_NET_SCOPE ParseAltiumNetIdentifierScope( const wxString& aPrjPcbPath )
++{
++    wxFileConfig config( wxEmptyString, wxEmptyString, wxEmptyString, aPrjPcbPath,
++                         wxCONFIG_USE_NO_ESCAPE_CHARACTERS );
++
++    long mode = 0;
++    config.Read( wxS( "Design/HierarchyMode" ), &mode, 0 );
++
++    if( mode < static_cast<long>( ALTIUM_NET_SCOPE::AUTOMATIC )
++        || mode > static_cast<long>( ALTIUM_NET_SCOPE::STRICT_HIERARCHICAL ) )
++    {
++        return ALTIUM_NET_SCOPE::AUTOMATIC;
++    }
++
++    return static_cast<ALTIUM_NET_SCOPE>( mode );
++}
++
++
+ std::vector<ALTIUM_PROJECT_VARIANT> ParseAltiumProjectVariants( const wxString& aPrjPcbPath )
+ {
+     std::vector<ALTIUM_PROJECT_VARIANT> variants;
+diff --git a/common/io/altium/altium_project_variants.h b/common/io/altium/altium_project_variants.h
+index 6d9ce093..7d77cadd 100644
+--- a/common/io/altium/altium_project_variants.h
++++ b/common/io/altium/altium_project_variants.h
+@@ -71,6 +71,30 @@ struct ALTIUM_PROJECT_VARIANT
+ std::vector<ALTIUM_PROJECT_VARIANT> ParseAltiumProjectVariants( const wxString& aPrjPcbPath );
+ 
+ 
++/**
++ * Altium's "Net Identifier Scope": which net names connect across sheets. Stored as
++ * HierarchyMode in the [Design] section of a .PrjPcb.
++ */
++enum class ALTIUM_NET_SCOPE
++{
++    AUTOMATIC = 0,          ///< Resolved from the design: hierarchical if any sheet entries,
++                            ///<   else flat if any ports, else global
++    FLAT = 1,               ///< Ports are global; net labels are local to their sheet
++    HIERARCHICAL = 2,       ///< Ports connect only through sheet entries
++    GLOBAL = 3,             ///< Net labels and ports are global
++    STRICT_HIERARCHICAL = 4 ///< As hierarchical, with power ports local too
++};
++
++
++/**
++ * Read the net identifier scope of an Altium .PrjPcb project file.
++ *
++ * @param aPrjPcbPath Full path to the .PrjPcb file.
++ * @return The stored scope, or AUTOMATIC when it is missing or not recognised.
++ */
++ALTIUM_NET_SCOPE ParseAltiumNetIdentifierScope( const wxString& aPrjPcbPath );
++
++
+ /**
+  * Parse all [ParameterN] sections from an Altium .PrjPcb project file.
+  *
+diff --git a/eeschema/sch_io/altium/sch_io_altium.cpp b/eeschema/sch_io/altium/sch_io_altium.cpp
+index e80b482b..c0e93441 100644
+--- a/eeschema/sch_io/altium/sch_io_altium.cpp
++++ b/eeschema/sch_io/altium/sch_io_altium.cpp
+@@ -600,31 +600,73 @@ SCH_SHEET* SCH_IO_ALTIUM::LoadSchematicFile( const wxString& aFileName, SCHEMATI
+         if( !topLevelSheets.empty() )
+             aSchematic->SetTopLevelSheets( topLevelSheets );
+ 
+-        // Convert hierarchical labels to global labels on top-level sheets.
+-        // Top-level sheets have no parent, so hierarchical labels don't make sense.
+-        for( SCH_SHEET* sheet : topLevelSheets )
++        // Ports are imported as hierarchical labels and net labels as local labels. Which of
++        // them connect across sheets in Altium depends on the project's net identifier scope.
++        ALTIUM_NET_SCOPE scope = ALTIUM_NET_SCOPE::AUTOMATIC;
++
++        if( aProperties->count( "project_file" ) )
++            scope = ParseAltiumNetIdentifierScope( aProperties->at( "project_file" ) );
++
++        if( scope == ALTIUM_NET_SCOPE::AUTOMATIC )
+         {
+-            SCH_SCREEN* screen = sheet->GetScreen();
++            if( m_sawSheetEntries )
++                scope = ALTIUM_NET_SCOPE::HIERARCHICAL;
++            else if( m_sawPorts )
++                scope = ALTIUM_NET_SCOPE::FLAT;
++            else
++                scope = ALTIUM_NET_SCOPE::GLOBAL;
++        }
+ 
+-            if( !screen )
++        const bool portsGlobal = scope == ALTIUM_NET_SCOPE::FLAT || scope == ALTIUM_NET_SCOPE::GLOBAL;
++        const bool netLabelsGlobal = scope == ALTIUM_NET_SCOPE::GLOBAL;
++
++        std::set<SCH_SCREEN*> topLevelScreens;
++        std::set<SCH_SCREEN*> allScreens;
++
++        for( SCH_SHEET* sheet : topLevelSheets )
++        {
++            if( !sheet->GetScreen() )
+                 continue;
+ 
+-            std::vector<SCH_HIERLABEL*> hierLabels;
++            topLevelScreens.insert( sheet->GetScreen() );
++
++            SCH_SCREENS screens( sheet );
++
++            for( SCH_SCREEN* screen = screens.GetFirst(); screen; screen = screens.GetNext() )
++                allScreens.insert( screen );
++        }
++
++        for( SCH_SCREEN* screen : allScreens )
++        {
++            // Top-level sheets have no parent, so hierarchical labels never make sense there.
++            const bool convertPorts = portsGlobal || topLevelScreens.contains( screen );
++
++            std::vector<SCH_LABEL_BASE*> labels;
+ 
+             for( SCH_ITEM* item : screen->Items().OfType( SCH_HIER_LABEL_T ) )
+-                hierLabels.push_back( static_cast<SCH_HIERLABEL*>( item ) );
++            {
++                if( convertPorts )
++                    labels.push_back( static_cast<SCH_LABEL_BASE*>( item ) );
++            }
+ 
+-            for( SCH_HIERLABEL* hierLabel : hierLabels )
++            for( SCH_ITEM* item : screen->Items().OfType( SCH_LABEL_T ) )
+             {
+-                SCH_GLOBALLABEL* globalLabel = new SCH_GLOBALLABEL( hierLabel->GetPosition(),
+-                                                                     hierLabel->GetText() );
+-                globalLabel->SetShape( hierLabel->GetShape() );
+-                globalLabel->SetSpinStyle( hierLabel->GetSpinStyle() );
++                if( netLabelsGlobal )
++                    labels.push_back( static_cast<SCH_LABEL_BASE*>( item ) );
++            }
++
++            for( SCH_LABEL_BASE* label : labels )
++            {
++                SCH_GLOBALLABEL* globalLabel = new SCH_GLOBALLABEL( label->GetPosition(),
++                                                                     label->GetText() );
++                globalLabel->SetShape( label->GetShape() );
++                globalLabel->SetSpinStyle( label->GetSpinStyle() );
++                globalLabel->SetTextSize( label->GetTextSize() );
+                 globalLabel->GetField( FIELD_T::INTERSHEET_REFS )->SetVisible( false );
+ 
+-                screen->Remove( hierLabel );
++                screen->Remove( label );
+                 screen->Append( globalLabel );
+-                delete hierLabel;
++                delete label;
+             }
+         }
+ 
+@@ -3958,6 +4000,7 @@ void SCH_IO_ALTIUM::ParseSheetSymbol( int aIndex, const std::map<wxString, wxStr
+ void SCH_IO_ALTIUM::ParseSheetEntry( const std::map<wxString, wxString>& aProperties )
+ {
+     ASCH_SHEET_ENTRY elem( aProperties );
++    m_sawSheetEntries = true;
+ 
+     const auto& sheetIt = m_sheets.find( elem.ownerindex );
+ 
+@@ -4350,6 +4393,8 @@ void SCH_IO_ALTIUM::ParseHarnessPort( const ASCH_PORT& aElem )
+ 
+ void SCH_IO_ALTIUM::ParsePort( const ASCH_PORT& aElem )
+ {
++    m_sawPorts = true;
++
+     if( !aElem.HarnessType.IsEmpty() )
+     {
+         // Parse harness ports after "Additional" compound section is parsed
+diff --git a/eeschema/sch_io/altium/sch_io_altium.h b/eeschema/sch_io/altium/sch_io_altium.h
+index 9acc391d..38134cd0 100644
+--- a/eeschema/sch_io/altium/sch_io_altium.h
++++ b/eeschema/sch_io/altium/sch_io_altium.h
+@@ -254,6 +254,10 @@ private:
+     std::vector<ASCH_PORT>             m_altiumHarnessPortsCurrentSheet;
+     std::map<int, HARNESS>             m_altiumHarnesses;
+ 
++    // What the parsed sheets contain; resolves an "Automatic" net identifier scope.
++    bool m_sawSheetEntries = false;
++    bool m_sawPorts = false;
++
+     // Add offset to all harness ownerIndex'es after parsing FileHeader.
+     int m_harnessOwnerIndexOffset;
+     int m_harnessEntryParent; // used to identify harness connector for harness entry element

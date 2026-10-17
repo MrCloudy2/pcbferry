@@ -1,0 +1,29 @@
+diff --git a/eeschema/sch_io/altium/sch_io_altium.cpp b/eeschema/sch_io/altium/sch_io_altium.cpp
+index d4f6c31f..c64545ef 100644
+--- a/eeschema/sch_io/altium/sch_io_altium.cpp
++++ b/eeschema/sch_io/altium/sch_io_altium.cpp
+@@ -927,12 +927,23 @@ void SCH_IO_ALTIUM::CreateAliases()
+         BOX2I     box( harness.m_location, harness.m_size );
+         SCH_LINE* busLine = nullptr;
+ 
++        // A bus starting at one of the harness's own entries is that member's sub-bus (e.g.
++        // LVDS_P[7..0]), never the harness bus; joining the harness to it ties the group to one
++        // vector, and KiCad then pairs the bits of every vector member with it by index.
++        std::set<VECTOR2I> entryPoints;
++
++        for( const HARNESS::HARNESS_PORT& port : harness.m_ports )
++            entryPoints.insert( port.m_location );
++
+         for( SCH_ITEM* elem : screen->Items().Overlapping( SCH_LINE_T, box ) )
+         {
+             SCH_LINE* line = static_cast<SCH_LINE*>( elem );
+ 
+-            if( !line->IsBus() )
++            if( !line->IsBus() || entryPoints.contains( line->GetStartPoint() )
++                || entryPoints.contains( line->GetEndPoint() ) )
++            {
+                 continue;
++            }
+ 
+             busLine = line;
+ 

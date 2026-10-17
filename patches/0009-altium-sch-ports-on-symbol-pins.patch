@@ -1,0 +1,40 @@
+diff --git a/eeschema/sch_io/altium/sch_io_altium.cpp b/eeschema/sch_io/altium/sch_io_altium.cpp
+index 0abbba66..25b90dee 100644
+--- a/eeschema/sch_io/altium/sch_io_altium.cpp
++++ b/eeschema/sch_io/altium/sch_io_altium.cpp
+@@ -4851,10 +4851,33 @@ void SCH_IO_ALTIUM::ParsePortHelper( const ASCH_PORT& aElem )
+     SCH_SCREEN* screen = getCurrentScreen();
+     wxCHECK( screen, /* void */ );
+ 
+-    bool startIsWireTerminal = screen->IsTerminalPoint( start, LAYER_WIRE );
++    // A port may sit directly on a symbol pin. Symbols are not linked to their library symbols
++    // yet while the sheet is parsed, so the screen cannot see their pins; look them up here.
++    auto isSymbolPinEnd =
++            [&]( const VECTOR2I& aPoint ) -> bool
++            {
++                for( const auto& [index, symbol] : m_symbols )
++                {
++                    auto libIt = m_libSymbols.find( index );
++
++                    if( libIt == m_libSymbols.end() )
++                        continue;
++
++                    for( SCH_PIN* pin : libIt->second->GetGraphicalPins( symbol->GetUnit(),
++                                                                         symbol->GetBodyStyle() ) )
++                    {
++                        if( symbol->GetPinPhysicalPosition( pin ) == aPoint )
++                            return true;
++                    }
++                }
++
++                return false;
++            };
++
++    bool startIsWireTerminal = screen->IsTerminalPoint( start, LAYER_WIRE ) || isSymbolPinEnd( start );
+     bool startIsBusTerminal  = screen->IsTerminalPoint( start, LAYER_BUS );
+ 
+-    bool endIsWireTerminal = screen->IsTerminalPoint( end, LAYER_WIRE );
++    bool endIsWireTerminal = screen->IsTerminalPoint( end, LAYER_WIRE ) || isSymbolPinEnd( end );
+     bool endIsBusTerminal  = screen->IsTerminalPoint( end, LAYER_BUS );
+ 
+     // check if any of the points is a terminal point

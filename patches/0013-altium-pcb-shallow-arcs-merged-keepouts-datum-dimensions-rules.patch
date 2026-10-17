@@ -1,0 +1,342 @@
+diff --git a/pcbnew/pcb_io/altium/altium_parser_pcb.cpp b/pcbnew/pcb_io/altium/altium_parser_pcb.cpp
+index e160fd19..ebaac726 100644
+--- a/pcbnew/pcb_io/altium/altium_parser_pcb.cpp
++++ b/pcbnew/pcb_io/altium/altium_parser_pcb.cpp
+@@ -898,6 +898,25 @@ ARULE6::ARULE6( ALTIUM_BINARY_PARSER& aReader )
+     else if( rulekind == wxT( "DiffPairsRouting" ) )
+     {
+         kind = ALTIUM_RULE_KIND::DIFF_PAIR_ROUTINGS;
++        clearanceGap = ALTIUM_PROPS_UTILS::ReadKicadUnit( props, wxT( "MOSTFREQGAP" ), wxT( "10mil" ) );
++        preferredWidth = ALTIUM_PROPS_UTILS::ReadKicadUnit( props, wxT( "TOPLAYER_PREFWIDTH" ),
++                                                            wxT( "10mil" ) );
++    }
++    else if( rulekind == wxT( "MinimumAnnularRing" ) )
++    {
++        kind = ALTIUM_RULE_KIND::MINIMUM_ANNULAR_RING;
++        minLimit = ALTIUM_PROPS_UTILS::ReadKicadUnit( props, wxT( "MINIMUMRING" ), wxT( "10mil" ) );
++    }
++    else if( rulekind == wxT( "SilkToSilkClearance" ) )
++    {
++        kind = ALTIUM_RULE_KIND::SILK_TO_SILK_CLEARANCE;
++        clearanceGap = ALTIUM_PROPS_UTILS::ReadKicadUnit( props, wxT( "SILKTOSILKCLEARANCE" ),
++                                                          wxT( "10mil" ) );
++    }
++    else if( rulekind == wxT( "MinimumSolderMaskSliver" ) )
++    {
++        kind = ALTIUM_RULE_KIND::SOLDER_MASK_SLIVER;
++        minLimit = ALTIUM_PROPS_UTILS::ReadKicadUnit( props, wxT( "MINSOLDERMASKWIDTH" ), wxT( "10mil" ) );
+     }
+     else if( rulekind == wxT( "Height" ) )
+     {
+@@ -908,6 +927,10 @@ ARULE6::ARULE6( ALTIUM_BINARY_PARSER& aReader )
+         kind = ALTIUM_RULE_KIND::HOLE_SIZE;
+         minLimit = ALTIUM_PROPS_UTILS::ReadKicadUnit( props, wxT( "MINLIMIT" ), wxT( "1mil" ) );
+         maxLimit = ALTIUM_PROPS_UTILS::ReadKicadUnit( props, wxT( "MAXLIMIT" ), wxT( "150mil" ) );
++
++        // Limits given as percentages of the pad are not lengths
++        if( !ALTIUM_PROPS_UTILS::ReadBool( props, wxT( "ABSOLUTEVALUES" ), true ) )
++            minLimit = maxLimit = 0;
+     }
+     else if( rulekind == wxT( "HoleToHoleClearance" ) )
+     {
+diff --git a/pcbnew/pcb_io/altium/altium_parser_pcb.h b/pcbnew/pcb_io/altium/altium_parser_pcb.h
+index 54e56f15..068cb3a9 100644
+--- a/pcbnew/pcb_io/altium/altium_parser_pcb.h
++++ b/pcbnew/pcb_io/altium/altium_parser_pcb.h
+@@ -127,7 +127,10 @@ enum class ALTIUM_RULE_KIND
+     PLANE_CLEARANCE         = 9,
+     POLYGON_CONNECT         = 10,
+     ROUTING_VIAS            = 11,
+-    BOARD_OUTLINE_CLEARANCE = 12
++    BOARD_OUTLINE_CLEARANCE = 12,
++    MINIMUM_ANNULAR_RING    = 13,
++    SILK_TO_SILK_CLEARANCE  = 14,
++    SOLDER_MASK_SLIVER      = 15
+ };
+ 
+ enum class ALTIUM_CONNECT_STYLE
+@@ -661,14 +664,19 @@ struct ARULE6
+ 
+     // ALTIUM_RULE_KIND::CLEARANCE
+     // ALTIUM_RULE_KIND::HOLE_TO_HOLE_CLEARANCE
++    // ALTIUM_RULE_KIND::SILK_TO_SILK_CLEARANCE
++    // ALTIUM_RULE_KIND::DIFF_PAIR_ROUTINGS (the preferred gap)
+     int clearanceGap = 0;
+ 
+     // ALTIUM_RULE_KIND::WIDTH
+     // ALTIUM_RULE_KIND::HOLE_SIZE
++    // ALTIUM_RULE_KIND::MINIMUM_ANNULAR_RING
++    // ALTIUM_RULE_KIND::SOLDER_MASK_SLIVER
+     int minLimit = 0;
+     int maxLimit = 0;
+ 
+     // ALTIUM_RULE_KIND::WIDTH
++    // ALTIUM_RULE_KIND::DIFF_PAIR_ROUTINGS (top layer)
+     int preferredWidth = 0;
+ 
+     // ALTIUM_RULE_KIND::ROUTING_VIAS
+diff --git a/pcbnew/pcb_io/altium/altium_pcb.cpp b/pcbnew/pcb_io/altium/altium_pcb.cpp
+index 0ef7833d..ae1c3d6d 100644
+--- a/pcbnew/pcb_io/altium/altium_pcb.cpp
++++ b/pcbnew/pcb_io/altium/altium_pcb.cpp
+@@ -753,6 +753,8 @@ void ALTIUM_PCB::Parse( const ALTIUM_PCB_COMPOUND_FILE&              altiumPcbFi
+     // pad has been attached to its footprint.
+     HelperSetFootprintMountingStyles();
+ 
++    HelperCreateBoardKeepoutRegions();
++
+     // fixup zone priorities since Altium stores them in the opposite order
+     for( ZONE* zone : m_polygons )
+     {
+@@ -2340,16 +2342,74 @@ void ALTIUM_PCB::HelperParseDimensions6Datum( const ADIMENSION6& aElem )
+         klayer = Eco1_User;
+     }
+ 
+-    for( size_t i = 0; i < aElem.referencePoint.size(); i++ )
++    // A datum (ordinate) dimension labels each reference point with its distance from the first
++    // one, the datum, along the dimension's axis. KiCad has no ordinate dimension, so each label
++    // becomes an orthogonal dimension from the datum, its crossbar through the label's position.
++    EDA_ANGLE axis( aElem.angle, DEGREES_T );
++    axis.Normalize();
++
++    PCB_DIM_ORTHOGONAL::DIR orientation;
++
++    if( axis == ANGLE_0 || axis == ANGLE_180 )
++    {
++        orientation = PCB_DIM_ORTHOGONAL::DIR::HORIZONTAL;
++    }
++    else if( axis == ANGLE_90 || axis == ANGLE_270 )
+     {
+-        std::unique_ptr<PCB_SHAPE> shape = std::make_unique<PCB_SHAPE>( m_board, SHAPE_T::SEGMENT );
++        orientation = PCB_DIM_ORTHOGONAL::DIR::VERTICAL;
++    }
++    else
++    {
++        if( m_reporter )
++        {
++            m_reporter->Report( wxString::Format( _( "Ignored Datum dimension at %.1f degrees (only "
++                                                     "horizontal and vertical are supported)." ),
++                                                  aElem.angle ),
++                                RPT_SEVERITY_INFO );
++        }
+ 
+-        shape->SetLayer( klayer );
+-        shape->SetStroke( STROKE_PARAMS( aElem.linewidth, LINE_STYLE::SOLID ) );
+-        shape->SetStart( aElem.referencePoint.at( i ) );
+-        // shape->SetEnd( /* TODO: seems to be based on TEXTY */ );
++        return;
++    }
+ 
+-        m_board->Add( shape.release(), ADD_MODE::APPEND );
++    if( aElem.referencePoint.size() < 2 )
++        return;
++
++    const VECTOR2I& datum = aElem.referencePoint.front();
++
++    for( size_t i = 1; i < aElem.referencePoint.size(); i++ )
++    {
++        std::unique_ptr<PCB_DIM_ORTHOGONAL> dimension = std::make_unique<PCB_DIM_ORTHOGONAL>( m_board );
++
++        const VECTOR2I& point = aElem.referencePoint[i];
++        VECTOR2I        label = i < aElem.textPoint.size() ? aElem.textPoint[i] : point;
++
++        dimension->SetLayer( klayer );
++        dimension->SetOrientation( orientation );
++        dimension->SetStart( datum );
++        dimension->SetEnd( point );
++        dimension->SetHeight( orientation == PCB_DIM_ORTHOGONAL::DIR::HORIZONTAL ? label.y - datum.y
++                                                                                 : label.x - datum.x );
++
++        dimension->SetPrecision( static_cast<DIM_PRECISION>( aElem.textprecision ) );
++        dimension->SetLineThickness( aElem.linewidth );
++        dimension->SetUnitsFormat( DIM_UNITS_FORMAT::NO_SUFFIX );
++        dimension->SetPrefix( aElem.textprefix );
++        dimension->SetSuffix( aElem.textsuffix );
++        dimension->SetTextThickness( aElem.textbold ? aElem.textlinewidth * BOLD_FACTOR
++                                                    : aElem.textlinewidth );
++        dimension->SetTextSize( VECTOR2I( aElem.textheight, aElem.textheight ) );
++        dimension->SetItalic( aElem.textitalic );
++
++        switch( aElem.textunit )
++        {
++        case ALTIUM_UNIT::INCH: dimension->SetUnits( EDA_UNITS::INCH ); break;
++        case ALTIUM_UNIT::MILS: dimension->SetUnits( EDA_UNITS::MILS ); break;
++        case ALTIUM_UNIT::MM:   dimension->SetUnits( EDA_UNITS::MM );   break;
++        case ALTIUM_UNIT::CM:   dimension->SetUnits( EDA_UNITS::MM );   break;
++        default:                                                        break;
++        }
++
++        m_board->Add( dimension.release(), ADD_MODE::APPEND );
+     }
+ }
+ 
+@@ -2417,12 +2477,7 @@ void ALTIUM_PCB::ParseDimensions6Data( const ALTIUM_PCB_COMPOUND_FILE&     aAlti
+             HelperParseDimensions6Leader( elem );
+             break;
+         case ALTIUM_DIMENSION_KIND::DATUM:
+-            if( m_reporter )
+-            {
+-                m_reporter->Report( wxString::Format( _( "Ignored Datum dimension (not yet supported)." ) ),
+-                                    RPT_SEVERITY_INFO );
+-            }
+-            // HelperParseDimensions6Datum( elem );
++            HelperParseDimensions6Datum( elem );
+             break;
+         case ALTIUM_DIMENSION_KIND::BASELINE:
+             if( m_reporter )
+@@ -2920,11 +2975,22 @@ void ALTIUM_PCB::ParseRules6Data( const ALTIUM_PCB_COMPOUND_FILE&     aAltiumPcb
+         m_board->GetDesignSettings().m_MinThroughDrill = routingViasRule->minHoleWidth;
+     }
+ 
+-    if( holeSizeRule )
++    if( holeSizeRule && holeSizeRule->minLimit > 0 )
+     {
+-        // TODO: construct a custom rule for minLimit / maxLimit values
++        // Altium's hole size rule covers every hole, vias included
++        m_board->GetDesignSettings().m_MinThroughDrill = holeSizeRule->minLimit;
++        // TODO: construct a custom rule for the maxLimit value
+     }
+ 
++    if( const ARULE6* ringRule = GetRuleDefault( ALTIUM_RULE_KIND::MINIMUM_ANNULAR_RING ) )
++        m_board->GetDesignSettings().m_ViasMinAnnularWidth = ringRule->minLimit;
++
++    if( const ARULE6* silkRule = GetRuleDefault( ALTIUM_RULE_KIND::SILK_TO_SILK_CLEARANCE ) )
++        m_board->GetDesignSettings().m_SilkClearance = silkRule->clearanceGap;
++
++    if( const ARULE6* sliverRule = GetRuleDefault( ALTIUM_RULE_KIND::SOLDER_MASK_SLIVER ) )
++        m_board->GetDesignSettings().m_SolderMaskMinWidth = sliverRule->minLimit;
++
+     if( holeToHoleRule )
+         m_board->GetDesignSettings().m_HoleToHoleMin = holeToHoleRule->clearanceGap;
+ 
+@@ -2949,6 +3015,12 @@ void ALTIUM_PCB::ParseRules6Data( const ALTIUM_PCB_COMPOUND_FILE&     aAltiumPcb
+     if( trackWidthRule )
+         defaultNetclass->SetTrackWidth( trackWidthRule->preferredWidth );
+ 
++    if( const ARULE6* diffPairRule = GetRuleDefault( ALTIUM_RULE_KIND::DIFF_PAIR_ROUTINGS ) )
++    {
++        defaultNetclass->SetDiffPairWidth( diffPairRule->preferredWidth );
++        defaultNetclass->SetDiffPairGap( diffPairRule->clearanceGap );
++    }
++
+     if( routingViasRule )
+     {
+         defaultNetclass->SetViaDiameter( routingViasRule->width );
+@@ -3796,7 +3868,34 @@ void ALTIUM_PCB::ConvertArcs6ToBoardItemOnLayer( const AARC6& aElem, PCB_LAYER_I
+         includedAngle.Normalize();
+ 
+         if( includedAngle.AsDegrees() >= 0.1 )
++        {
+             addArc( aElem.center + startOffset, includedAngle );
++            return;
++        }
++
++        // Too shallow for a stable PCB_ARC, but it still joins two track ends: keep that copper
++        // as a straight segment between its endpoints.
++        EDA_ANGLE startAngleRaw( aElem.startangle, DEGREES_T );
++        VECTOR2I  arcStart = aElem.center + VECTOR2I( KiROUND( startAngleRaw.Cos() * aElem.radius ),
++                                                      -KiROUND( startAngleRaw.Sin() * aElem.radius ) );
++        VECTOR2I  arcEnd = aElem.center + startOffset;
++
++        if( arcStart == arcEnd )
++            return;
++
++        std::unique_ptr<PCB_TRACK> track = std::make_unique<PCB_TRACK>( m_board );
++
++        track->SetStart( arcStart );
++        track->SetEnd( arcEnd );
++        track->SetWidth( aElem.width );
++        track->SetLayer( aLayer );
++        track->SetNetCode( GetNetCode( aElem.net ) );
++
++        PCB_TRACK* added = track.release();
++        m_board->Add( added, ADD_MODE::APPEND );
++
++        if( aElem.unionindex != 0 )
++            m_unionToBoardItems[static_cast<int>( aElem.unionindex )].push_back( added );
+     }
+     else
+     {
+@@ -5871,19 +5970,40 @@ void ALTIUM_PCB::HelperPcpShapeAsBoardKeepoutRegion( const PCB_SHAPE&   aShape,
+     if( restrictions == 0 )
+         return;
+ 
+-    std::unique_ptr<ZONE> zone = std::make_unique<ZONE>( m_board );
++    // Gathered and merged once the board is read (HelperCreateBoardKeepoutRegions)
++    aShape.EDA_SHAPE::TransformShapeToPolygon( m_boardKeepouts[{ aAltiumLayer, restrictions }], 0,
++                                               ARC_HIGH_DEF, ERROR_INSIDE );
++}
+ 
+-    zone->SetIsRuleArea( true );
+ 
+-    HelperSetZoneLayers( *zone, aAltiumLayer );
+-    HelperSetZoneKeepoutRestrictions( *zone, restrictions );
++void ALTIUM_PCB::HelperCreateBoardKeepoutRegions()
++{
++    for( auto& [key, polys] : m_boardKeepouts )
++    {
++        const auto& [altiumLayer, restrictions] = key;
+ 
+-    aShape.EDA_SHAPE::TransformShapeToPolygon( *zone->Outline(), 0, ARC_HIGH_DEF, ERROR_INSIDE );
++        // Overlapping and touching shapes (a keepout drawn as many tracks) become one outline.
++        polys.Simplify();
+ 
+-    zone->SetBorderDisplayStyle( ZONE_BORDER_DISPLAY_STYLE::DIAGONAL_EDGE,
+-                                 ZONE::GetDefaultHatchPitch(), true );
++        for( int ii = 0; ii < polys.OutlineCount(); ++ii )
++        {
++            std::unique_ptr<ZONE> zone = std::make_unique<ZONE>( m_board );
++
++            zone->SetIsRuleArea( true );
++
++            HelperSetZoneLayers( *zone, altiumLayer );
++            HelperSetZoneKeepoutRestrictions( *zone, restrictions );
++
++            zone->Outline()->AddPolygon( polys.CPolygon( ii ) );
++
++            zone->SetBorderDisplayStyle( ZONE_BORDER_DISPLAY_STYLE::DIAGONAL_EDGE,
++                                         ZONE::GetDefaultHatchPitch(), true );
++
++            m_board->Add( zone.release(), ADD_MODE::APPEND );
++        }
++    }
+ 
+-    m_board->Add( zone.release(), ADD_MODE::APPEND );
++    m_boardKeepouts.clear();
+ }
+ 
+ 
+diff --git a/pcbnew/pcb_io/altium/altium_pcb.h b/pcbnew/pcb_io/altium/altium_pcb.h
+index bf5fa549..4927677d 100644
+--- a/pcbnew/pcb_io/altium/altium_pcb.h
++++ b/pcbnew/pcb_io/altium/altium_pcb.h
+@@ -28,6 +28,7 @@
+ #include <core/utf8.h>
+ #include <embedded_files.h>
+ #include <functional>
++#include <geometry/shape_poly_set.h>
+ #include <layer_ids.h>
+ #include <map>
+ #include <memory>
+@@ -318,6 +319,10 @@ private:
+                                                  const ALTIUM_LAYER aAltiumLayer,
+                                                  const uint8_t      aKeepoutRestrictions );
+ 
++    /// Turn the board keepout shapes gathered per layer and restriction set into rule areas,
++    /// one per merged outline.
++    void HelperCreateBoardKeepoutRegions();
++
+     void HelperSetTextboxAlignmentAndPos( const ATEXT6& aElem, PCB_TEXTBOX* aPcbTextbox );
+     void HelperSetTextAlignmentAndPos( const ATEXT6& aElem, EDA_TEXT* aEdaText );
+ 
+@@ -374,6 +379,10 @@ private:
+ 
+     std::map<ALTIUM_LAYER, ZONE*>        m_outer_plane;
+ 
++    /// Board keepout geometry by Altium layer and KiCad restriction mask. Altium keepouts are
++    /// often drawn as many tracks; each one as its own rule area floods the board.
++    std::map<std::pair<ALTIUM_LAYER, uint8_t>, SHAPE_POLY_SET> m_boardKeepouts;
++
+     LAYER_MAPPING_HANDLER   m_layerMappingHandler;
+ 
+     PROGRESS_REPORTER* m_progressReporter;   ///< optional; may be nullptr

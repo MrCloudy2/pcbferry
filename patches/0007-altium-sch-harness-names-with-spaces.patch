@@ -1,0 +1,115 @@
+diff --git a/eeschema/sch_io/altium/sch_io_altium.cpp b/eeschema/sch_io/altium/sch_io_altium.cpp
+index 765fe9be..11e83b26 100644
+--- a/eeschema/sch_io/altium/sch_io_altium.cpp
++++ b/eeschema/sch_io/altium/sch_io_altium.cpp
+@@ -91,6 +91,8 @@
+ // AltiumDeriveSheetName below.
+ wxString AltiumWrapBusLabel( const wxString& aText );
+ static void matchSheetPinsToHarnessPorts( SCH_SHEET* aTop );
++static wxString harnessName( const wxString& aName );
++static wxString harnessType( const wxString& aType );
+ wxString AltiumDeriveSheetName( const wxString& aFilename, const std::set<wxString>& aExistingNames );
+ 
+ 
+@@ -1062,7 +1064,7 @@ void SCH_IO_ALTIUM::CreateAliases()
+ 
+         // KiCad bus labels need some special handling to be recognized as bus labels
+         if( label && !label->GetText().Contains( wxT( "{" ) ) )
+-            label->SetText( label->GetText() + wxT( "{" ) + harness.m_name + wxT( "}" ) );
++            label->SetText( harnessName( label->GetText() ) + wxT( "{" ) + harness.m_name + wxT( "}" ) );
+ 
+         // The group prefix becomes the prefix of every member net.
+         wxString prefix;
+@@ -1310,6 +1312,24 @@ static void matchSheetPinsToHarnessPorts( SCH_SHEET* aTop )
+ }
+ 
+ 
++// Altium harness names and types may contain spaces ("DRIVER DIGITAL INPUT"), which KiCad bus
++// groups use as separators, and Altium matches types regardless of case. Use one KiCad-safe
++// spelling everywhere a harness name or type ends up in a label.
++static wxString harnessName( const wxString& aName )
++{
++    wxString name = aName;
++    name.Trim( true ).Trim( false );
++    name.Replace( wxT( " " ), wxT( "_" ) );
++    return name;
++}
++
++
++static wxString harnessType( const wxString& aType )
++{
++    return harnessName( aType ).Upper();
++}
++
++
+ // A port or sheet entry named as a bus vector (LED[0..7]) carries its bits by name; a harness
+ // type attached to it must not turn the name into an (invalid) bus group like LED[0..7]{LED}.
+ static bool isBusVectorName( const wxString& aName )
+@@ -1449,8 +1469,12 @@ void SCH_IO_ALTIUM::PostProcessBusLabels()
+     {
+         SCH_LABEL* label = static_cast<SCH_LABEL*>( item );
+ 
+-        if( SCH_CONNECTION::IsBusLabel( label->GetText() ) || m_harnessEntryLabels.contains( label ) )
++        // A label holding a group already (even one KiCad can't parse) is never wrapped again
++        if( SCH_CONNECTION::IsBusLabel( label->GetText() ) || label->GetText().Contains( wxT( "{" ) )
++            || m_harnessEntryLabels.contains( label ) )
++        {
+             continue;
++        }
+ 
+         for( SCH_ITEM* busItem : screen->Items().Overlapping( SCH_LINE_T, label->GetBoundingBox() ) )
+         {
+@@ -1468,7 +1492,7 @@ void SCH_IO_ALTIUM::PostProcessBusLabels()
+     {
+         // A net label on a signal harness names the harness: its nets become NAME.member.
+         if( !harnessType.IsEmpty() )
+-            label->SetText( label->GetText() + wxT( "{" ) + harnessType + wxT( "}" ) );
++            label->SetText( harnessName( label->GetText() ) + wxT( "{" ) + harnessType + wxT( "}" ) );
+         else
+             label->SetText( AltiumWrapBusLabel( label->GetText() ) );
+     }
+@@ -4157,7 +4181,7 @@ void SCH_IO_ALTIUM::ParseHarnessEntry( const std::map<wxString, wxString>& aProp
+ 
+     HARNESS& harness = harnessIt->second;
+     HARNESS::HARNESS_PORT port;
+-    port.m_name = elem.Name;
++    port.m_name = harnessName( elem.Name );
+     port.m_harnessConnectorSide = elem.Side;
+     port.m_primaryConnectionPosition = 0;
+ 
+@@ -4211,7 +4235,7 @@ void SCH_IO_ALTIUM::ParseHarnessType( const std::map<wxString, wxString>& aPrope
+     }
+ 
+     HARNESS& harness = harnessIt->second;
+-    harness.m_name = elem.Text;
++    harness.m_name = harnessType( elem.Text );
+ }
+ 
+ 
+@@ -4342,7 +4366,7 @@ void SCH_IO_ALTIUM::ParseSheetEntry( const std::map<wxString, wxString>& aProper
+     wxString pinName = elem.name;
+ 
+     if( !elem.harnessType.IsEmpty() && !isBusVectorName( pinName ) )
+-        pinName += wxT( "{" ) + elem.harnessType + wxT( "}" );
++        pinName = harnessName( pinName ) + wxT( "{" ) + harnessType( elem.harnessType ) + wxT( "}" );
+ 
+     sheetPin->SetText( pinName );
+     sheetPin->SetShape( LABEL_FLAG_SHAPE::L_UNSPECIFIED );
+@@ -4775,7 +4799,7 @@ void SCH_IO_ALTIUM::ParsePortHelper( const ASCH_PORT& aElem )
+     {
+         for( auto& [ _, harness ] : m_altiumHarnesses )
+         {
+-            if( harness.m_name.CmpNoCase( aElem.HarnessType ) != 0 )
++            if( harness.m_name != harnessType( aElem.HarnessType ) )
+                 continue;
+ 
+             BOX2I bbox( harness.m_location, harness.m_size );
+@@ -4810,7 +4834,7 @@ void SCH_IO_ALTIUM::ParsePortHelper( const ASCH_PORT& aElem )
+     wxString labelName = aElem.Name;
+ 
+     if( !aElem.HarnessType.IsEmpty() && !isBusVectorName( labelName ) )
+-        labelName += wxT( "{" ) + aElem.HarnessType + wxT( "}" );
++        labelName = harnessName( labelName ) + wxT( "{" ) + harnessType( aElem.HarnessType ) + wxT( "}" );
+ 
+     // TODO: detect correct label type depending on sheet settings, etc.
+ #if 1   // Set to 1 to use SCH_HIERLABEL label, 0 to use SCH_GLOBALLABEL

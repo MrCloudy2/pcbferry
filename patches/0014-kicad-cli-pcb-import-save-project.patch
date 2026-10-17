@@ -1,0 +1,43 @@
+diff --git a/pcbnew/pcbnew_jobs_handler.cpp b/pcbnew/pcbnew_jobs_handler.cpp
+index 2b6addb2..6cb19edb 100644
+--- a/pcbnew/pcbnew_jobs_handler.cpp
++++ b/pcbnew/pcbnew_jobs_handler.cpp
+@@ -2911,8 +2911,17 @@ int PCBNEW_JOBS_HANDLER::JobImport( JOB* aJob )
+                                               job->m_inputFile, formatName ),
+                             RPT_SEVERITY_INFO );
+ 
++        // Design rules and netclasses live in the project file, not the board, so the board
++        // gets a project next to it; without one the importer's rules were lost on save.
++        wxFileName proFn( outputPath );
++        proFn.SetExt( FILEEXT::ProjectFileExtension );
++
++        SETTINGS_MANAGER& mgr = Pgm().GetSettingsManager();
++        mgr.LoadProject( proFn.GetFullPath(), true );
++        PROJECT* project = mgr.GetProject( proFn.GetFullPath() );
++
+         pi->SetReporter( &importMessages );
+-        board = pi->LoadBoard( job->m_inputFile, nullptr, nullptr, nullptr );
++        board = pi->LoadBoard( job->m_inputFile, nullptr, nullptr, project );
+ 
+         for( const auto& [text, severity] : importMessages.m_messages )
+         {
+@@ -2928,10 +2937,19 @@ int PCBNEW_JOBS_HANDLER::JobImport( JOB* aJob )
+             return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
+         }
+ 
++        if( project )
++            board->SetProject( project );
++
+         // Save as KiCad format
+         IO_RELEASER<PCB_IO> kicadPlugin( PCB_IO_MGR::FindPlugin( PCB_IO_MGR::KICAD_SEXP ) );
+         kicadPlugin->SaveBoard( outputPath, board );
+ 
++        if( project )
++        {
++            board->SynchronizeNetsAndNetClasses( false );
++            mgr.SaveProject( proFn.GetFullPath(), project );
++        }
++
+         m_reporter->Report( wxString::Format( _( "Successfully saved imported board to '%s'\n" ),
+                                               outputPath ),
+                             RPT_SEVERITY_INFO );

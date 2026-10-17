@@ -1,0 +1,847 @@
+diff --git a/common/CMakeLists.txt b/common/CMakeLists.txt
+index eb808f63..19044f2a 100644
+--- a/common/CMakeLists.txt
++++ b/common/CMakeLists.txt
+@@ -164,6 +164,7 @@ set( KICOMMON_SRCS
+     jobs/job_sym_export_svg.cpp
+     jobs/job_sym_upgrade.cpp
+     jobs/job_pcb_upgrade.cpp
++    jobs/job_sch_import.cpp
+     jobs/job_sch_upgrade.cpp
+ 
+     local_history.cpp
+diff --git a/common/jobs/job_sch_import.cpp b/common/jobs/job_sch_import.cpp
+new file mode 100644
+index 00000000..395b1b8b
+--- /dev/null
++++ b/common/jobs/job_sch_import.cpp
+@@ -0,0 +1,65 @@
++/*
++ * This program source code file is part of KiCad, a free EDA CAD application.
++ *
++ * Copyright The KiCad Developers, see AUTHORS.txt for contributors.
++ *
++ * This program is free software: you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the
++ * Free Software Foundation, either version 3 of the License, or (at your
++ * option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include <jobs/job_sch_import.h>
++#include <wx/intl.h>
++#include <i18n_utility.h>
++
++
++NLOHMANN_JSON_SERIALIZE_ENUM( JOB_SCH_IMPORT::FORMAT,
++                              {
++                                  { JOB_SCH_IMPORT::FORMAT::AUTO, "auto" },
++                                  { JOB_SCH_IMPORT::FORMAT::ALTIUM, "altium" },
++                                  { JOB_SCH_IMPORT::FORMAT::CADSTAR, "cadstar" },
++                                  { JOB_SCH_IMPORT::FORMAT::EAGLE, "eagle" },
++                                  { JOB_SCH_IMPORT::FORMAT::EASYEDA, "easyeda" },
++                                  { JOB_SCH_IMPORT::FORMAT::EASYEDAPRO, "easyedapro" },
++                                  { JOB_SCH_IMPORT::FORMAT::GEDA, "geda" },
++                                  { JOB_SCH_IMPORT::FORMAT::LTSPICE, "ltspice" },
++                                  { JOB_SCH_IMPORT::FORMAT::PADS, "pads" }
++                              } )
++
++
++NLOHMANN_JSON_SERIALIZE_ENUM( JOB_SCH_IMPORT::REPORT_FORMAT,
++                              {
++                                  { JOB_SCH_IMPORT::REPORT_FORMAT::NONE, "none" },
++                                  { JOB_SCH_IMPORT::REPORT_FORMAT::JSON, "json" },
++                                  { JOB_SCH_IMPORT::REPORT_FORMAT::TEXT, "text" }
++                              } )
++
++
++JOB_SCH_IMPORT::JOB_SCH_IMPORT() :
++        JOB( "sch_import", false )
++{
++    m_params.emplace_back( new JOB_PARAM<FORMAT>( "format", &m_format, m_format ) );
++    m_params.emplace_back( new JOB_PARAM<REPORT_FORMAT>( "report_format", &m_reportFormat, m_reportFormat ) );
++    m_params.emplace_back( new JOB_PARAM<wxString>( "report_file", &m_reportFile, m_reportFile ) );
++}
++
++
++wxString JOB_SCH_IMPORT::GetDefaultDescription() const
++{
++    return _( "Import Schematic" );
++}
++
++
++wxString JOB_SCH_IMPORT::GetSettingsDialogTitle() const
++{
++    return _( "Schematic Import Job Settings" );
++}
+diff --git a/common/jobs/job_sch_import.h b/common/jobs/job_sch_import.h
+new file mode 100644
+index 00000000..4df6b7b9
+--- /dev/null
++++ b/common/jobs/job_sch_import.h
+@@ -0,0 +1,66 @@
++/*
++ * This program source code file is part of KiCad, a free EDA CAD application.
++ *
++ * Copyright The KiCad Developers, see AUTHORS.txt for contributors.
++ *
++ * This program is free software: you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the
++ * Free Software Foundation, either version 3 of the License, or (at your
++ * option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef JOB_SCH_IMPORT_H
++#define JOB_SCH_IMPORT_H
++
++#include <kicommon.h>
++#include "job.h"
++
++/**
++ * Job to import a non-KiCad schematic to KiCad format.
++ *
++ * Supports the formats handled by the SCH_IO import plugins (Altium, Eagle, CADSTAR, ...).
++ * Sub-sheets referenced by the input are imported too and written next to the output file.
++ */
++class KICOMMON_API JOB_SCH_IMPORT : public JOB
++{
++public:
++    JOB_SCH_IMPORT();
++
++    wxString GetDefaultDescription() const override;
++    wxString GetSettingsDialogTitle() const override;
++
++    enum class FORMAT
++    {
++        AUTO,
++        ALTIUM,
++        CADSTAR,
++        EAGLE,
++        EASYEDA,
++        EASYEDAPRO,
++        GEDA,
++        LTSPICE,
++        PADS
++    };
++
++    enum class REPORT_FORMAT
++    {
++        NONE,
++        JSON,
++        TEXT
++    };
++
++    wxString      m_inputFile;
++    FORMAT        m_format = FORMAT::AUTO;
++    REPORT_FORMAT m_reportFormat = REPORT_FORMAT::NONE;
++    wxString      m_reportFile;
++};
++
++#endif
+diff --git a/eeschema/eeschema_helpers.cpp b/eeschema/eeschema_helpers.cpp
+index 6815e647..c51e8a49 100644
+--- a/eeschema/eeschema_helpers.cpp
++++ b/eeschema/eeschema_helpers.cpp
+@@ -59,8 +59,14 @@ SCHEMATIC* EESCHEMA_HELPERS::LoadSchematic( const wxString& aFileName, bool aSet
+         return LoadSchematic( aFileName, SCH_IO_MGR::SCH_LEGACY, aSetActive, aForceDefaultProject,
+                               aProject, aCalculateConnectivity );
+ 
+-    // as fall back for any other kind use the legacy format
+-    return LoadSchematic( aFileName, SCH_IO_MGR::SCH_LEGACY, aSetActive, aForceDefaultProject, aProject,
++    // Let the importers recognise their own files (Altium, Eagle, ...); fall back to the
++    // legacy format for anything they don't claim.
++    SCH_IO_MGR::SCH_FILE_T fileType = SCH_IO_MGR::GuessPluginTypeFromSchPath( aFileName );
++
++    if( fileType == SCH_IO_MGR::SCH_FILE_UNKNOWN )
++        fileType = SCH_IO_MGR::SCH_LEGACY;
++
++    return LoadSchematic( aFileName, fileType, aSetActive, aForceDefaultProject, aProject,
+                           aCalculateConnectivity );
+ }
+ 
+diff --git a/eeschema/eeschema_jobs_handler.cpp b/eeschema/eeschema_jobs_handler.cpp
+index 22dee1e3..76b7d4ce 100644
+--- a/eeschema/eeschema_jobs_handler.cpp
++++ b/eeschema/eeschema_jobs_handler.cpp
+@@ -30,6 +30,7 @@
+ #include <jobs/job_export_sch_netlist.h>
+ #include <jobs/job_export_sch_plot.h>
+ #include <jobs/job_sch_erc.h>
++#include <jobs/job_sch_import.h>
+ #include <jobs/job_sch_upgrade.h>
+ #include <jobs/job_sym_export_svg.h>
+ #include <jobs/job_sym_upgrade.h>
+@@ -52,6 +53,13 @@
+ #include <drawing_sheet/ds_data_model.h>
+ #include <paths.h>
+ #include <reporter.h>
++#include <sch_commit.h>
++#include <project/project_file.h>
++#include <wx/ffile.h>
++#include <sch_io/sch_io_mgr.h>
++#include <tool/tool_manager.h>
++#include <kiface_base.h>
++#include <nlohmann/json.hpp>
+ #include <string_utils.h>
+ 
+ #include <settings/settings_manager.h>
+@@ -169,6 +177,11 @@ EESCHEMA_JOBS_HANDLER::EESCHEMA_JOBS_HANDLER( KIWAY* aKiway ) :
+               {
+                   return true;
+               } );
++    Register( "sch_import", std::bind( &EESCHEMA_JOBS_HANDLER::JobSchImport, this, std::placeholders::_1 ),
++              []( JOB* job, wxWindow* aParent ) -> bool
++              {
++                  return true;
++              } );
+ }
+ 
+ 
+@@ -1431,6 +1444,413 @@ int EESCHEMA_JOBS_HANDLER::JobUpgrade( JOB* aJob )
+ }
+ 
+ 
++namespace
++{
++/**
++ * Keeps each message an importer reports, so they can go into the import report one by one.
++ */
++class COLLECTING_REPORTER : public REPORTER
++{
++public:
++    REPORTER& Report( const wxString& aText, SEVERITY aSeverity = RPT_SEVERITY_UNDEFINED ) override
++    {
++        REPORTER::Report( aText, aSeverity );
++
++        wxString text = aText;
++        text.Trim( true ).Trim( false );
++
++        if( !text.IsEmpty() )
++            m_messages.emplace_back( text, aSeverity );
++
++        return *this;
++    }
++
++    std::vector<std::pair<wxString, SEVERITY>> m_messages;
++};
++
++
++SCH_IO_MGR::SCH_FILE_T importFileType( JOB_SCH_IMPORT::FORMAT aFormat, const wxString& aPath )
++{
++    switch( aFormat )
++    {
++    case JOB_SCH_IMPORT::FORMAT::AUTO:       return SCH_IO_MGR::GuessPluginTypeFromSchPath( aPath );
++    case JOB_SCH_IMPORT::FORMAT::ALTIUM:     return SCH_IO_MGR::SCH_ALTIUM;
++    case JOB_SCH_IMPORT::FORMAT::CADSTAR:    return SCH_IO_MGR::SCH_CADSTAR_ARCHIVE;
++    case JOB_SCH_IMPORT::FORMAT::EAGLE:      return SCH_IO_MGR::SCH_EAGLE;
++    case JOB_SCH_IMPORT::FORMAT::EASYEDA:    return SCH_IO_MGR::SCH_EASYEDA;
++    case JOB_SCH_IMPORT::FORMAT::EASYEDAPRO: return SCH_IO_MGR::SCH_EASYEDAPRO;
++    case JOB_SCH_IMPORT::FORMAT::GEDA:       return SCH_IO_MGR::SCH_GEDA;
++    case JOB_SCH_IMPORT::FORMAT::LTSPICE:    return SCH_IO_MGR::SCH_LTSPICE;
++    case JOB_SCH_IMPORT::FORMAT::PADS:       return SCH_IO_MGR::SCH_PADS;
++    }
++
++    return SCH_IO_MGR::SCH_FILE_UNKNOWN;
++}
++
++
++/**
++ * Resolve a document path from an Altium project. Projects come from Windows, so the stored
++ * case often differs from the file on disk.
++ */
++wxString resolveProjectDocument( const wxString& aProjectDir, const wxString& aStoredPath )
++{
++    wxFileName fn( aStoredPath, wxPATH_WIN );
++
++    if( !fn.IsAbsolute() )
++        fn.MakeAbsolute( aProjectDir );
++
++    if( fn.FileExists() )
++        return fn.GetFullPath();
++
++    wxDir    dir( fn.GetPath() );
++    wxString candidate;
++
++    if( dir.IsOpened() && dir.GetFirst( &candidate, wxEmptyString, wxDIR_FILES ) )
++    {
++        do
++        {
++            if( candidate.CmpNoCase( fn.GetFullName() ) == 0 )
++                return wxFileName( fn.GetPath(), candidate ).GetFullPath();
++        } while( dir.GetNext( &candidate ) );
++    }
++
++    return wxEmptyString;
++}
++
++
++/**
++ * Build the properties the Altium importer expects for a whole-project import: the project
++ * file and every schematic document it lists. This is what the interactive project import
++ * passes; it is also the only path that brings in Altium variants.
++ */
++std::map<std::string, UTF8> altiumProjectProperties( const wxFileName& aProjectFile,
++                                                     REPORTER& aReporter )
++{
++    std::map<std::string, UTF8> props;
++    props["project_file"] = aProjectFile.GetFullPath().ToStdString();
++
++    wxFFile file( aProjectFile.GetFullPath(), wxS( "rb" ) );
++    wxString text;
++
++    if( !file.IsOpened() || !file.ReadAll( &text, wxConvAuto() ) )
++        return props;
++
++    bool inDocument = false;
++    int  sheetIndex = 0;
++
++    for( wxString line : wxSplit( text, '\n', '\0' ) )
++    {
++        line.Trim( true ).Trim( false );
++
++        if( line.StartsWith( wxS( "[" ) ) )
++        {
++            inDocument = line.Upper().StartsWith( wxS( "[DOCUMENT" ) );
++            continue;
++        }
++
++        if( !inDocument || !line.Upper().StartsWith( wxS( "DOCUMENTPATH=" ) ) )
++            continue;
++
++        wxString stored = line.AfterFirst( '=' );
++
++        if( !wxFileName( stored, wxPATH_WIN ).GetExt().IsSameAs( wxS( "SchDoc" ), false ) )
++            continue;
++
++        wxString path = resolveProjectDocument( aProjectFile.GetPath(), stored );
++
++        if( path.IsEmpty() )
++        {
++            aReporter.Report( wxString::Format( _( "Schematic '%s' listed in the project was not "
++                                                   "found" ),
++                                                stored ),
++                              RPT_SEVERITY_WARNING );
++            continue;
++        }
++
++        props["sch" + std::to_string( sheetIndex++ )] = path.ToStdString();
++    }
++
++    return props;
++}
++} // namespace
++
++
++int EESCHEMA_JOBS_HANDLER::JobSchImport( JOB* aJob )
++{
++    JOB_SCH_IMPORT* job = dynamic_cast<JOB_SCH_IMPORT*>( aJob );
++
++    if( !job )
++        return CLI::EXIT_CODES::ERR_UNKNOWN;
++
++    wxFileName inputFn( job->m_inputFile );
++    inputFn.MakeAbsolute();
++
++    if( !inputFn.FileExists() )
++    {
++        m_reporter->Report( wxString::Format( _( "Input file not found: '%s'\n" ), job->m_inputFile ),
++                            RPT_SEVERITY_ERROR );
++        return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
++    }
++
++    const bool isAltiumProject = inputFn.GetExt().IsSameAs( wxS( "PrjPcb" ), false );
++
++    SCH_IO_MGR::SCH_FILE_T fileType = isAltiumProject ? SCH_IO_MGR::SCH_ALTIUM
++                                                      : importFileType( job->m_format,
++                                                                        inputFn.GetFullPath() );
++
++    if( fileType == SCH_IO_MGR::SCH_FILE_UNKNOWN || fileType == SCH_IO_MGR::SCH_KICAD
++        || fileType == SCH_IO_MGR::SCH_LEGACY )
++    {
++        m_reporter->Report( wxString::Format( _( "'%s' is not a schematic format that can be "
++                                                 "imported\n" ),
++                                              job->m_inputFile ),
++                            RPT_SEVERITY_ERROR );
++        return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
++    }
++
++    wxFileName outputFn( job->GetConfiguredOutputPath().IsEmpty() ? inputFn.GetFullPath()
++                                                                  : job->GetConfiguredOutputPath() );
++    outputFn.SetExt( FILEEXT::KiCadSchematicFileExtension );
++    outputFn.MakeAbsolute();
++
++    if( !outputFn.DirExists() && !wxFileName::Mkdir( outputFn.GetPath(), wxS_DIR_DEFAULT,
++                                                     wxPATH_MKDIR_FULL ) )
++    {
++        m_reporter->Report( wxString::Format( _( "Could not create directory '%s'\n" ),
++                                              outputFn.GetPath() ),
++                            RPT_SEVERITY_ERROR );
++        return CLI::EXIT_CODES::ERR_INVALID_OUTPUT_CONFLICT;
++    }
++
++    // Importers place sub-sheets in the project folder, so the project must live next to the
++    // output before anything is loaded.
++    wxFileName proFn( outputFn );
++    proFn.SetExt( FILEEXT::ProjectFileExtension );
++
++    SETTINGS_MANAGER& mgr = Pgm().GetSettingsManager();
++    mgr.LoadProject( proFn.GetFullPath(), true );
++    PROJECT* project = mgr.GetProject( proFn.GetFullPath() );
++
++    if( !project )
++    {
++        m_reporter->Report( wxString::Format( _( "Could not create project '%s'\n" ),
++                                              proFn.GetFullPath() ),
++                            RPT_SEVERITY_ERROR );
++        return CLI::EXIT_CODES::ERR_UNKNOWN;
++    }
++
++    const wxString formatName = SCH_IO_MGR::ShowType( fileType );
++
++    m_reporter->Report( wxString::Format( _( "Importing '%s' using %s format...\n" ),
++                                          inputFn.GetFullPath(), formatName ),
++                        RPT_SEVERITY_INFO );
++
++    COLLECTING_REPORTER importReporter;
++    LOCALE_IO           dummy;
++
++    std::unique_ptr<SCHEMATIC> schematic = std::make_unique<SCHEMATIC>( project );
++    SCH_SHEET_LIST             sheetList;
++
++    try
++    {
++        LOAD_INFO_REPORTER_SCOPE loadInfoScope( &importReporter );
++        IO_RELEASER<SCH_IO>      pi( SCH_IO_MGR::FindPlugin( fileType ) );
++
++        pi->SetReporter( &importReporter );
++
++        if( isAltiumProject )
++        {
++            // The importer makes every sheet without a parent a top-level sheet itself.
++            std::map<std::string, UTF8> props = altiumProjectProperties( inputFn, importReporter );
++
++            if( !pi->LoadSchematicFile( wxEmptyString, schematic.get(), nullptr, &props )
++                || schematic->GetTopLevelSheets().empty() )
++            {
++                m_reporter->Report( _( "Failed to load project schematics\n" ), RPT_SEVERITY_ERROR );
++                return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
++            }
++
++            // Sheets keep their source names, except the first top-level sheet, which becomes
++            // the requested output file so it can be passed straight to other commands.
++            SCH_SHEET* firstSheet = schematic->GetTopLevelSheets().front();
++            firstSheet->SetFileName( outputFn.GetFullName() );
++            firstSheet->GetScreen()->SetFileName( outputFn.GetFullPath() );
++        }
++        else
++        {
++            SCH_SHEET* loadedSheet = pi->LoadSchematicFile( inputFn.GetFullPath(), schematic.get() );
++
++            if( !loadedSheet )
++            {
++                m_reporter->Report( _( "Failed to load schematic\n" ), RPT_SEVERITY_ERROR );
++                return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
++            }
++
++            schematic->SetTopLevelSheets( { loadedSheet } );
++
++            if( loadedSheet->GetName().IsEmpty() )
++                loadedSheet->SetName( _( "Root" ) );
++
++            loadedSheet->SetFileName( outputFn.GetFullName() );
++            loadedSheet->GetScreen()->SetFileName( outputFn.GetFullPath() );
++        }
++
++        // Non-KiCad schematics do not use a KiCad drawing sheet; match the interactive import.
++        DS_DATA_MODEL::GetTheInstance().SetEmptyLayout();
++        BASE_SCREEN::m_DrawingSheetFileName = "empty.kicad_wks";
++
++        sheetList = schematic->BuildSheetListSortedByPageNumbers();
++        SCH_SCREENS screens( schematic->Root() );
++
++        for( SCH_SCREEN* screen = screens.GetFirst(); screen; screen = screens.GetNext() )
++            screen->UpdateLocalLibSymbolLinks();
++
++        sheetList.AnnotatePowerSymbols();
++
++        if( sheetList.AllSheetPageNumbersEmpty() )
++            sheetList.SetInitialPageNumbers();
++        else
++            sheetList.RepairPageNumbers();
++
++        TOOL_MANAGER toolManager;
++        toolManager.SetEnvironment( schematic.get(), nullptr, nullptr, Kiface().KifaceSettings(),
++                                    nullptr );
++
++        SCH_COMMIT dummyCommit( &toolManager );
++        schematic->RecalculateConnections( &dummyCommit, GLOBAL_CLEANUP, &toolManager );
++        schematic->SetSheetNumberAndCount();
++
++        for( SCH_SHEET_PATH& sheet : sheetList )
++        {
++            sheet.UpdateAllScreenReferences();
++            sheet.LastScreen()->TestDanglingEnds( nullptr, nullptr );
++        }
++
++        IO_RELEASER<SCH_IO> kicadIo( SCH_IO_MGR::FindPlugin( SCH_IO_MGR::SCH_KICAD ) );
++
++        for( size_t i = 0; i < screens.GetCount(); i++ )
++        {
++            SCH_SCREEN* screen = screens.GetScreen( i );
++
++            // The virtual root only holds the top-level sheets; it has no file of its own.
++            if( screens.GetSheet( i )->m_Uuid == niluuid )
++                continue;
++
++            wxFileName screenFn( screen->GetFileName() );
++
++            // Every sheet goes next to the top-level output, whatever path the importer chose.
++            screenFn.SetPath( outputFn.GetPath() );
++            screenFn.SetExt( FILEEXT::KiCadSchematicFileExtension );
++            screen->SetFileName( screenFn.GetFullPath() );
++
++            kicadIo->SaveSchematicFile( screenFn.GetFullPath(), screens.GetSheet( i ),
++                                        schematic.get() );
++        }
++
++        // Record the top-level sheets so the project opens with all of them.
++        std::vector<TOP_LEVEL_SHEET_INFO>& projectSheets =
++                project->GetProjectFile().GetTopLevelSheets();
++        projectSheets.clear();
++
++        for( SCH_SHEET* sheet : schematic->GetTopLevelSheets() )
++        {
++            wxFileName sheetFn( sheet->GetScreen()->GetFileName() );
++            sheetFn.MakeRelativeTo( outputFn.GetPath() );
++            projectSheets.emplace_back( sheet->m_Uuid, sheet->GetName(), sheetFn.GetFullPath() );
++        }
++
++        mgr.SaveProject( proFn.GetFullPath(), project );
++    }
++    catch( const IO_ERROR& ioe )
++    {
++        m_reporter->Report( wxString::Format( _( "Error during import: %s\n" ), ioe.What() ),
++                            RPT_SEVERITY_ERROR );
++        return CLI::EXIT_CODES::ERR_UNKNOWN;
++    }
++    catch( const std::exception& exc )
++    {
++        m_reporter->Report( wxString::Format( _( "Error during import: %s\n" ), exc.what() ),
++                            RPT_SEVERITY_ERROR );
++        return CLI::EXIT_CODES::ERR_UNKNOWN;
++    }
++
++    m_reporter->Report( wxString::Format( _( "Successfully saved imported schematic to '%s'\n" ),
++                                          outputFn.GetFullPath() ),
++                        RPT_SEVERITY_INFO );
++
++    if( job->m_reportFormat == JOB_SCH_IMPORT::REPORT_FORMAT::NONE )
++        return CLI::EXIT_CODES::SUCCESS;
++
++    size_t symbolCount = 0;
++
++    for( const SCH_SHEET_PATH& sheet : sheetList )
++    {
++        for( SCH_ITEM* item : sheet.LastScreen()->Items().OfType( SCH_SYMBOL_T ) )
++        {
++            wxUnusedVar( item );
++            symbolCount++;
++        }
++    }
++
++    wxString reportOutput;
++
++    if( job->m_reportFormat == JOB_SCH_IMPORT::REPORT_FORMAT::JSON )
++    {
++        nlohmann::json warnings = nlohmann::json::array();
++        nlohmann::json errors = nlohmann::json::array();
++
++        for( const auto& [text, severity] : importReporter.m_messages )
++        {
++            if( severity == RPT_SEVERITY_ERROR )
++                errors.push_back( text.ToStdString() );
++            else if( severity == RPT_SEVERITY_WARNING )
++                warnings.push_back( text.ToStdString() );
++        }
++
++        nlohmann::json report;
++        report["source_file"] = inputFn.GetFullName().ToStdString();
++        report["source_format"] = formatName.ToStdString();
++        report["output_file"] = outputFn.GetFullName().ToStdString();
++        report["statistics"] = { { "sheets", sheetList.size() }, { "symbols", symbolCount } };
++        report["warnings"] = warnings;
++        report["errors"] = errors;
++
++        reportOutput = wxString::FromUTF8( report.dump( 2 ) );
++    }
++    else
++    {
++        reportOutput += wxS( "Import Report\n=============\n\n" );
++        reportOutput += wxString::Format( wxS( "Source file: %s\n" ), inputFn.GetFullName() );
++        reportOutput += wxString::Format( wxS( "Source format: %s\n" ), formatName );
++        reportOutput += wxString::Format( wxS( "Output file: %s\n\n" ), outputFn.GetFullName() );
++        reportOutput += wxString::Format( wxS( "Statistics:\n  Sheets: %zu\n  Symbols: %zu\n" ),
++                                          sheetList.size(), symbolCount );
++
++        if( !importReporter.m_messages.empty() )
++        {
++            reportOutput += wxS( "\nMessages:\n" );
++
++            for( const auto& [text, severity] : importReporter.m_messages )
++                reportOutput += wxString::Format( wxS( "  - %s\n" ), text );
++        }
++    }
++
++    if( job->m_reportFile.IsEmpty() )
++    {
++        m_reporter->Report( reportOutput + wxS( "\n" ), RPT_SEVERITY_INFO );
++    }
++    else
++    {
++        wxFile file( job->m_reportFile, wxFile::write );
++
++        if( file.IsOpened() )
++            file.Write( reportOutput );
++    }
++
++    return CLI::EXIT_CODES::SUCCESS;
++}
++
++
+ DS_PROXY_VIEW_ITEM* EESCHEMA_JOBS_HANDLER::getDrawingSheetProxyView( SCHEMATIC* aSch )
+ {
+     DS_PROXY_VIEW_ITEM* drawingSheet =
+diff --git a/eeschema/eeschema_jobs_handler.h b/eeschema/eeschema_jobs_handler.h
+index 1b4d92a0..39c31a92 100644
+--- a/eeschema/eeschema_jobs_handler.h
++++ b/eeschema/eeschema_jobs_handler.h
+@@ -46,6 +46,7 @@ public:
+     int JobSymUpgrade( JOB* aJob );
+     int JobSymExportSvg( JOB* aJob );
+     int JobUpgrade( JOB* aJob );
++    int JobSchImport( JOB* aJob );
+ 
+     /**
+      * Configure the SCH_RENDER_SETTINGS object with the correct data to be used with plotting.
+diff --git a/kicad/CMakeLists.txt b/kicad/CMakeLists.txt
+index dae7b75f..1c4d559e 100644
+--- a/kicad/CMakeLists.txt
++++ b/kicad/CMakeLists.txt
+@@ -75,6 +75,7 @@ set( KICAD_CLI_SRCS
+     cli/command_pcb_import.cpp
+     cli/command_fp_export_svg.cpp
+     cli/command_fp_upgrade.cpp
++    cli/command_sch_import.cpp
+     cli/command_sch_upgrade.cpp
+     cli/command_sch_export_bom.cpp
+     cli/command_sch_export_pythonbom.cpp
+diff --git a/kicad/cli/command_sch_import.cpp b/kicad/cli/command_sch_import.cpp
+new file mode 100644
+index 00000000..c83301bc
+--- /dev/null
++++ b/kicad/cli/command_sch_import.cpp
+@@ -0,0 +1,114 @@
++/*
++ * This program source code file is part of KiCad, a free EDA CAD application.
++ *
++ * Copyright The KiCad Developers, see AUTHORS.txt for contributors.
++ *
++ * This program is free software: you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the
++ * Free Software Foundation, either version 3 of the License, or (at your
++ * option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include "command_sch_import.h"
++#include <cli/exit_codes.h>
++#include <jobs/job_sch_import.h>
++#include <kiface_base.h>
++#include <string_utils.h>
++#include <macros.h>
++#include <wx/crt.h>
++
++#include <map>
++
++
++#define ARG_FORMAT "--format"
++#define ARG_REPORT_FORMAT "--report-format"
++#define ARG_REPORT_FILE "--report-file"
++
++
++CLI::SCH_IMPORT_COMMAND::SCH_IMPORT_COMMAND() : COMMAND( "import" )
++{
++    addCommonArgs( true, true, IO_TYPE::FILE, IO_TYPE::FILE );
++
++    m_argParser.add_description(
++            UTF8STDSTR( _( "Import a non-KiCad schematic to KiCad format. Sub-sheets are "
++                           "imported too and written next to the output file." ) ) );
++
++    m_argParser.add_argument( ARG_FORMAT )
++            .default_value( std::string( "auto" ) )
++            .help( UTF8STDSTR( _( "Input format hint: auto, altium, cadstar, eagle, easyeda, "
++                                  "easyedapro, geda, ltspice, pads (default: auto)" ) ) )
++            .metavar( "FORMAT" );
++
++    m_argParser.add_argument( ARG_REPORT_FORMAT )
++            .default_value( std::string( "none" ) )
++            .help( UTF8STDSTR( _( "Import report format: none, json, text (default: none)" ) ) )
++            .metavar( "FORMAT" );
++
++    m_argParser.add_argument( ARG_REPORT_FILE )
++            .default_value( std::string( "" ) )
++            .help( UTF8STDSTR( _( "File path for import report (default: stdout)" ) ) )
++            .metavar( "FILE" );
++}
++
++
++int CLI::SCH_IMPORT_COMMAND::doPerform( KIWAY& aKiway )
++{
++    static const std::map<wxString, JOB_SCH_IMPORT::FORMAT> formats = {
++        { wxS( "auto" ), JOB_SCH_IMPORT::FORMAT::AUTO },
++        { wxS( "altium" ), JOB_SCH_IMPORT::FORMAT::ALTIUM },
++        { wxS( "cadstar" ), JOB_SCH_IMPORT::FORMAT::CADSTAR },
++        { wxS( "eagle" ), JOB_SCH_IMPORT::FORMAT::EAGLE },
++        { wxS( "easyeda" ), JOB_SCH_IMPORT::FORMAT::EASYEDA },
++        { wxS( "easyedapro" ), JOB_SCH_IMPORT::FORMAT::EASYEDAPRO },
++        { wxS( "geda" ), JOB_SCH_IMPORT::FORMAT::GEDA },
++        { wxS( "ltspice" ), JOB_SCH_IMPORT::FORMAT::LTSPICE },
++        { wxS( "pads" ), JOB_SCH_IMPORT::FORMAT::PADS }
++    };
++
++    static const std::map<wxString, JOB_SCH_IMPORT::REPORT_FORMAT> reportFormats = {
++        { wxS( "none" ), JOB_SCH_IMPORT::REPORT_FORMAT::NONE },
++        { wxS( "json" ), JOB_SCH_IMPORT::REPORT_FORMAT::JSON },
++        { wxS( "text" ), JOB_SCH_IMPORT::REPORT_FORMAT::TEXT }
++    };
++
++    std::unique_ptr<JOB_SCH_IMPORT> importJob = std::make_unique<JOB_SCH_IMPORT>();
++
++    importJob->m_inputFile = m_argInput;
++    importJob->SetConfiguredOutputPath( m_argOutput );
++
++    wxString format = From_UTF8( m_argParser.get<std::string>( ARG_FORMAT ).c_str() );
++
++    if( auto it = formats.find( format ); it != formats.end() )
++    {
++        importJob->m_format = it->second;
++    }
++    else
++    {
++        wxFprintf( stderr, _( "Invalid format: %s\n" ), format );
++        return EXIT_CODES::ERR_ARGS;
++    }
++
++    wxString reportFormat = From_UTF8( m_argParser.get<std::string>( ARG_REPORT_FORMAT ).c_str() );
++
++    if( auto it = reportFormats.find( reportFormat ); it != reportFormats.end() )
++    {
++        importJob->m_reportFormat = it->second;
++    }
++    else
++    {
++        wxFprintf( stderr, _( "Invalid report format: %s\n" ), reportFormat );
++        return EXIT_CODES::ERR_ARGS;
++    }
++
++    importJob->m_reportFile = From_UTF8( m_argParser.get<std::string>( ARG_REPORT_FILE ).c_str() );
++
++    return aKiway.ProcessJob( KIWAY::FACE_SCH, importJob.get() );
++}
+diff --git a/kicad/cli/command_sch_import.h b/kicad/cli/command_sch_import.h
+new file mode 100644
+index 00000000..c6de06a6
+--- /dev/null
++++ b/kicad/cli/command_sch_import.h
+@@ -0,0 +1,39 @@
++/*
++ * This program source code file is part of KiCad, a free EDA CAD application.
++ *
++ * Copyright The KiCad Developers, see AUTHORS.txt for contributors.
++ *
++ * This program is free software: you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the
++ * Free Software Foundation, either version 3 of the License, or (at your
++ * option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef COMMAND_SCH_IMPORT_H
++#define COMMAND_SCH_IMPORT_H
++
++#include "command.h"
++
++namespace CLI
++{
++
++class SCH_IMPORT_COMMAND : public COMMAND
++{
++public:
++    SCH_IMPORT_COMMAND();
++
++protected:
++    int doPerform( KIWAY& aKiway ) override;
++};
++
++}
++
++#endif
+diff --git a/kicad/kicad_cli.cpp b/kicad/kicad_cli.cpp
+index 763d37ab..4b662b39 100644
+--- a/kicad/kicad_cli.cpp
++++ b/kicad/kicad_cli.cpp
+@@ -85,6 +85,7 @@
+ #include "cli/command_sch.h"
+ #include "cli/command_sch_erc.h"
+ #include "cli/command_sch_export.h"
++#include "cli/command_sch_import.h"
+ #include "cli/command_sch_upgrade.h"
+ #include "cli/command_sym.h"
+ #include "cli/command_sym_export.h"
+@@ -159,6 +160,7 @@ static CLI::PCB_EXPORT_COMMAND           exportPcbCmd{};
+ static CLI::SCH_EXPORT_COMMAND           exportSchCmd{};
+ static CLI::SCH_COMMAND                  schCmd{};
+ static CLI::SCH_ERC_COMMAND              schErcCmd{};
++static CLI::SCH_IMPORT_COMMAND           schImportCmd{};
+ static CLI::SCH_UPGRADE_COMMAND          schUpgradeCmd{};
+ static CLI::SCH_EXPORT_BOM_COMMAND       exportSchBomCmd{};
+ static CLI::SCH_EXPORT_PYTHONBOM_COMMAND exportSchPythonBomCmd{};
+@@ -267,6 +269,9 @@ static std::vector<COMMAND_ENTRY> commandStack = {
+                     &exportSchSvgCmd
+                 }
+             },
++            {
++                &schImportCmd
++            },
+             {
+                 &schUpgradeCmd
+             }

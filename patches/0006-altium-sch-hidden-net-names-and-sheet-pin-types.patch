@@ -1,0 +1,191 @@
+diff --git a/eeschema/sch_io/altium/sch_io_altium.cpp b/eeschema/sch_io/altium/sch_io_altium.cpp
+index c53beb8a..765fe9be 100644
+--- a/eeschema/sch_io/altium/sch_io_altium.cpp
++++ b/eeschema/sch_io/altium/sch_io_altium.cpp
+@@ -90,6 +90,7 @@
+ // Pure label/name transforms shared with the QA suite; see AltiumWrapBusLabel and
+ // AltiumDeriveSheetName below.
+ wxString AltiumWrapBusLabel( const wxString& aText );
++static void matchSheetPinsToHarnessPorts( SCH_SHEET* aTop );
+ wxString AltiumDeriveSheetName( const wxString& aFilename, const std::set<wxString>& aExistingNames );
+ 
+ 
+@@ -600,6 +601,9 @@ SCH_SHEET* SCH_IO_ALTIUM::LoadSchematicFile( const wxString& aFileName, SCHEMATI
+         if( !topLevelSheets.empty() )
+             aSchematic->SetTopLevelSheets( topLevelSheets );
+ 
++        for( SCH_SHEET* sheet : topLevelSheets )
++            matchSheetPinsToHarnessPorts( sheet );
++
+         // Ports are imported as hierarchical labels and net labels as local labels. Which of
+         // them connect across sheets in Altium depends on the project's net identifier scope.
+         ALTIUM_NET_SCOPE scope = ALTIUM_NET_SCOPE::AUTOMATIC;
+@@ -673,6 +677,9 @@ SCH_SHEET* SCH_IO_ALTIUM::LoadSchematicFile( const wxString& aFileName, SCHEMATI
+         m_rootSheet = &aSchematic->Root();
+     }
+ 
++    if( !aFileName.empty() )
++        matchSheetPinsToHarnessPorts( m_rootSheet );
++
+     if( !aAppendToMe )
+         NormalizeRepeatedSheetInstances();
+ 
+@@ -1261,6 +1268,48 @@ void SCH_IO_ALTIUM::CreateAliases()
+ }
+ 
+ 
++// Altium sheet entries may carry no harness type while the port inside the sheet does. KiCad
++// pairs a sheet pin with the sheet's hierarchical label by exact text, so give an untyped
++// sheet pin the NAME{TYPE} text of its port.
++static void matchSheetPinsToHarnessPorts( SCH_SHEET* aTop )
++{
++    SCH_SCREENS screens( aTop );
++
++    for( SCH_SCREEN* screen = screens.GetFirst(); screen; screen = screens.GetNext() )
++    {
++        for( SCH_ITEM* item : screen->Items().OfType( SCH_SHEET_T ) )
++        {
++            SCH_SHEET*  sheet = static_cast<SCH_SHEET*>( item );
++            SCH_SCREEN* child = sheet->GetScreen();
++
++            if( !child )
++                continue;
++
++            std::map<wxString, wxString> typedPorts;
++
++            for( SCH_ITEM* label : child->Items().OfType( SCH_HIER_LABEL_T ) )
++            {
++                wxString text = static_cast<SCH_HIERLABEL*>( label )->GetText();
++
++                if( !text.StartsWith( wxT( "{" ) ) && text.Contains( wxT( "{" ) )
++                    && text.EndsWith( wxT( "}" ) ) )
++                {
++                    typedPorts[text.BeforeFirst( '{' )] = text;
++                }
++            }
++
++            for( SCH_SHEET_PIN* pin : sheet->GetPins() )
++            {
++                auto it = typedPorts.find( pin->GetText() );
++
++                if( it != typedPorts.end() )
++                    pin->SetText( it->second );
++            }
++        }
++    }
++}
++
++
+ // A port or sheet entry named as a bus vector (LED[0..7]) carries its bits by name; a harness
+ // type attached to it must not turn the name into an (invalid) bus group like LED[0..7]{LED}.
+ static bool isBusVectorName( const wxString& aName )
+@@ -1887,6 +1936,7 @@ void SCH_IO_ALTIUM::ParseFileHeader( const ALTIUM_COMPOUND_FILE& aAltiumSchFile
+     m_altiumImplementationList.clear();
+ 
+     m_symbols.clear();
++    m_pinsByRecord.clear();
+     m_libSymbols.clear();
+ 
+     // Otherwise we cannot save the imported sheet?
+@@ -2008,6 +2058,7 @@ void SCH_IO_ALTIUM::ParseASCIISchematic( const wxString& aFileName )
+     m_altiumImplementationList.clear();
+ 
+     m_symbols.clear();
++    m_pinsByRecord.clear();
+     m_libSymbols.clear();
+ 
+     // Otherwise we cannot save the imported sheet?
+@@ -2038,7 +2089,9 @@ void SCH_IO_ALTIUM::ParseRecord( int index, std::map<wxString, wxString>& proper
+         break;
+ 
+     case ALTIUM_SCH_RECORD::PIN:
+-        ParsePin( properties );
++        if( SCH_PIN* pin = ParsePin( properties ) )
++            m_pinsByRecord[index] = pin;
++
+         break;
+ 
+         case ALTIUM_SCH_RECORD::IEEE_SYMBOL:
+@@ -2396,7 +2449,7 @@ void SCH_IO_ALTIUM::ParseTemplate( int aIndex, const std::map<wxString, wxString
+ }
+ 
+ 
+-void SCH_IO_ALTIUM::ParsePin( const std::map<wxString, wxString>& aProperties,
++SCH_PIN* SCH_IO_ALTIUM::ParsePin( const std::map<wxString, wxString>& aProperties,
+                               std::vector<LIB_SYMBOL*>& aSymbol )
+ {
+     ASCH_PIN elem( aProperties );
+@@ -2415,11 +2468,11 @@ void SCH_IO_ALTIUM::ParsePin( const std::map<wxString, wxString>& aProperties,
+             m_errorMessages.emplace( wxString::Format( wxT( "Pin's owner (%d) not found." ),
+                                                        elem.ownerindex ),
+                                      RPT_SEVERITY_DEBUG );
+-            return;
++            return nullptr;
+         }
+ 
+         if( !IsComponentPartVisible( elem ) )
+-            return;
++            return nullptr;
+ 
+         schSymbol = m_symbols.at( libSymbolIt->first );
+         symbol = libSymbolIt->second;
+@@ -2585,6 +2638,8 @@ void SCH_IO_ALTIUM::ParsePin( const std::map<wxString, wxString>& aProperties,
+             break;
+         }
+     }
++
++    return pin;
+ }
+ 
+ 
+@@ -5217,6 +5272,21 @@ void SCH_IO_ALTIUM::ParseParameter( const std::map<wxString, wxString>& aPropert
+         { "VALUE",   "ALTIUM_VALUE" },
+     };
+ 
++    // A pin's hidden net name: Altium ties the (hidden) pin to that net. KiCad does the same
++    // for an invisible power input pin, by its name.
++    if( elem.name.IsSameAs( wxT( "HiddenNetName" ), false ) && !elem.text.IsEmpty() )
++    {
++        auto pinIt = m_pinsByRecord.find( elem.ownerindex );
++
++        if( pinIt != m_pinsByRecord.end() && !pinIt->second->IsVisible() )
++        {
++            pinIt->second->SetName( elem.text );
++            pinIt->second->SetType( ELECTRICAL_PINTYPE::PT_POWER_IN );
++        }
++
++        return;
++    }
++
+     if( elem.ownerindex <= 0 )
+     {
+         // This is some sheet parameter
+diff --git a/eeschema/sch_io/altium/sch_io_altium.h b/eeschema/sch_io/altium/sch_io_altium.h
+index c8f43e57..7cc6ed87 100644
+--- a/eeschema/sch_io/altium/sch_io_altium.h
++++ b/eeschema/sch_io/altium/sch_io_altium.h
+@@ -74,6 +74,7 @@ struct HARNESS
+ 
+ 
+ class SCH_LABEL;
++class SCH_PIN;
+ 
+ class SCH_IO_ALTIUM : public SCH_IO
+ {
+@@ -165,7 +166,7 @@ private:
+ 
+     void ParseComponent( int aIndex, const std::map<wxString, wxString>& aProperties );
+     void ParseTemplate( int aIndex, const std::map<wxString, wxString>& aProperties );
+-    void ParsePin( const std::map<wxString, wxString>& aProperties, std::vector<LIB_SYMBOL*>& aSymbol = nullsym);
++    SCH_PIN* ParsePin( const std::map<wxString, wxString>& aProperties, std::vector<LIB_SYMBOL*>& aSymbol = nullsym);
+     void ParseLabel( const std::map<wxString, wxString>& aProperties, std::vector<LIB_SYMBOL*>& aSymbol = nullsym,
+                      std::vector<int>& aFontSize = nullint );
+     void ParseTextFrame( const std::map<wxString, wxString>& aProperties, std::vector<LIB_SYMBOL*>& aSymbol = nullsym,
+@@ -241,6 +242,7 @@ private:
+     VECTOR2I                           m_sheetOffset;
+     std::unique_ptr<ASCH_SHEET>        m_altiumSheet;
+     std::map<int, SCH_SYMBOL*>         m_symbols;
++    std::map<int, SCH_PIN*>            m_pinsByRecord;      // schematic pins by record index
+     std::map<int, SCH_SHEET*>          m_sheets;
+     std::map<int, LIB_SYMBOL*>         m_libSymbols;        // every symbol has its unique lib_symbol
+ 

@@ -1,0 +1,487 @@
+diff --git a/common/io/altium/altium_ascii_parser.cpp b/common/io/altium/altium_ascii_parser.cpp
+index 4ac0de63..efc29a5a 100644
+--- a/common/io/altium/altium_ascii_parser.cpp
++++ b/common/io/altium/altium_ascii_parser.cpp
+@@ -111,23 +111,40 @@ std::map<wxString, wxString> ALTIUM_ASCII_PARSER::ReadProperties()
+             // Breathless hack because I haven't a clue what the story is here (but this character
+             // appears in a lot of radial dimensions and is rendered by Altium as a space).
+             value.Replace( wxT( "ÿ" ), wxT( " " ) );
++
++            // '|' separates the fields, so Altium stores it in a value as a broken bar.
++            value.Replace( wxT( "¦" ), wxT( "|" ) );
+         }
+ 
+-        // Storage binary data do not need conversion.
+-        if( str.rfind( "|BINARY", 0 ) != 0 )
++        kv.insert( { canonicalKey, value.Trim() } );
++    }
++
++    // Storage binary data do not need conversion. The record type and ISHIDDEN can follow the
++    // keys they govern, so decide once the whole record has been read.
++    if( str.rfind( "|BINARY", 0 ) != 0 )
++    {
++        auto     recordIt = kv.find( wxT( "RECORD" ) );
++        auto     hiddenIt = kv.find( wxT( "ISHIDDEN" ) );
++        wxString recordType = recordIt != kv.end() ? recordIt->second : wxString();
++
++        // RECORD=33 (FILE_NAME) stores Windows-formatted paths; keep the backslashes intact.
++        // So does a hidden parameter, which is data (often a path or URL), not drawn text.
++        bool rawText = recordType == wxT( "41" ) && hiddenIt != kv.end()
++                       && hiddenIt->second.StartsWith( wxT( "T" ) );
++
++        if( recordType != wxT( "4" ) && recordType != wxT( "33" ) )
+         {
+-            if( canonicalKey == wxT( "DESIGNATOR" ) || canonicalKey == wxT( "NAME" )
+-                || canonicalKey == wxT( "TEXT" ) )
++            for( const wxString key : { wxT( "DESIGNATOR" ), wxT( "NAME" ), wxT( "TEXT" ) } )
+             {
+-                wxString recordType = kv[ wxT( "RECORD" ) ];
++                if( rawText && ( key == wxT( "TEXT" ) || key == wxT( "NAME" ) ) )
++                    continue;
++
++                auto valueIt = kv.find( key );
+ 
+-                // RECORD=33 (FILE_NAME) stores Windows-formatted paths; keep the backslashes intact.
+-                if( recordType != wxT( "4" ) && recordType != wxT( "33" ) )
+-                    value = AltiumPropertyToKiCadString( value );
++                if( valueIt != kv.end() )
++                    valueIt->second = AltiumPropertyToKiCadString( valueIt->second );
+             }
+         }
+-
+-        kv.insert( { canonicalKey, value.Trim() } );
+     }
+ 
+     return kv;
+diff --git a/common/io/altium/altium_binary_parser.cpp b/common/io/altium/altium_binary_parser.cpp
+index 63c43d8f..9c0debc6 100644
+--- a/common/io/altium/altium_binary_parser.cpp
++++ b/common/io/altium/altium_binary_parser.cpp
+@@ -443,6 +443,9 @@ std::map<wxString, wxString> ALTIUM_BINARY_PARSER::ReadProperties(
+             // Breathless hack because I haven't a clue what the story is here (but this character
+             // appears in a lot of radial dimensions and is rendered by Altium as a space).
+             value.Replace( wxT( "ÿ" ), wxT( " " ) );
++
++            // '|' separates the fields, so Altium stores it in a value as a broken bar.
++            value.Replace( wxT( "¦" ), wxT( "|" ) );
+         }
+ 
+         kv.insert( { canonicalKey, value.Trim() } );
+@@ -456,8 +459,17 @@ std::map<wxString, wxString> ALTIUM_BINARY_PARSER::ReadProperties(
+ 
+     if( recordIt == kv.end() || recordIt->second != wxT( "4" ) )
+     {
++        // A hidden parameter is data, not drawn text (often a path or URL such as
++        // \\server\share\file.pdf), so its name and value keep their backslashes.
++        auto hiddenIt = kv.find( wxT( "ISHIDDEN" ) );
++        bool rawText = recordIt != kv.end() && recordIt->second == wxT( "41" )
++                       && hiddenIt != kv.end() && hiddenIt->second.StartsWith( wxT( "T" ) );
++
+         for( const wxString key : { wxT( "DESIGNATOR" ), wxT( "NAME" ), wxT( "TEXT" ) } )
+         {
++            if( rawText && ( key == wxT( "TEXT" ) || key == wxT( "NAME" ) ) )
++                continue;
++
+             auto valueIt = kv.find( key );
+ 
+             if( valueIt != kv.end() )
+diff --git a/common/io/altium/altium_project_variants.cpp b/common/io/altium/altium_project_variants.cpp
+index b67137ec..95c31805 100644
+--- a/common/io/altium/altium_project_variants.cpp
++++ b/common/io/altium/altium_project_variants.cpp
+@@ -49,7 +49,7 @@ static ALTIUM_VARIANT_ENTRY ParseVariationString( const wxString& aValue )
+ {
+     ALTIUM_VARIANT_ENTRY entry;
+ 
+-    for( const wxString& token : wxSplit( aValue, '|' ) )
++    for( const wxString& token : wxSplit( aValue, '|', '\0' ) )
+     {
+         int eqPos = token.Find( '=' );
+ 
+@@ -99,7 +99,7 @@ static ALTIUM_VARIANT_ENTRY ParseVariationString( const wxString& aValue )
+     // after it as sub-fields.
+     bool inAlternatePart = false;
+ 
+-    for( const wxString& token : wxSplit( aValue, '|' ) )
++    for( const wxString& token : wxSplit( aValue, '|', '\0' ) )
+     {
+         int eqPos = token.Find( '=' );
+ 
+@@ -237,7 +237,34 @@ std::vector<ALTIUM_PROJECT_VARIANT> ParseAltiumProjectVariants( const wxString&
+                 pv.variations.push_back( std::move( entry ) );
+         }
+ 
+-        if( !pv.variations.empty() )
++        // Parameter overrides are numbered separately, each paired with its designator.
++        long paramVariationCount = 0;
++        config.Read( groupname + wxS( "/ParamVariationCount" ), &paramVariationCount, 0 );
++
++        for( long pi = 1; pi <= paramVariationCount; ++pi )
++        {
++            wxString designator = config.Read(
++                    wxString::Format( wxS( "%s/ParamDesignator%ld" ), groupname, pi ), wxEmptyString );
++            wxString value = config.Read(
++                    wxString::Format( wxS( "%s/ParamVariation%ld" ), groupname, pi ), wxEmptyString );
++            wxString name;
++            wxString variantValue;
++
++            for( const wxString& token : wxSplit( value, '|', '\0' ) )
++            {
++                wxString key = token.BeforeFirst( '=' );
++
++                if( key.CmpNoCase( wxS( "ParameterName" ) ) == 0 )
++                    name = token.AfterFirst( '=' );
++                else if( key.CmpNoCase( wxS( "VariantValue" ) ) == 0 )
++                    variantValue = token.AfterFirst( '=' );
++            }
++
++            if( !designator.empty() && !name.empty() )
++                pv.paramVariations[designator][name] = variantValue;
++        }
++
++        if( !pv.variations.empty() || !pv.paramVariations.empty() )
+             variants.push_back( std::move( pv ) );
+     }
+ 
+diff --git a/common/io/altium/altium_project_variants.h b/common/io/altium/altium_project_variants.h
+index 7d77cadd..374364fa 100644
+--- a/common/io/altium/altium_project_variants.h
++++ b/common/io/altium/altium_project_variants.h
+@@ -59,6 +59,9 @@ struct ALTIUM_PROJECT_VARIANT
+     wxString                                 name;
+     wxString                                 description;
+     std::vector<ALTIUM_VARIANT_ENTRY>        variations;
++
++    /// Parameter values this variant overrides: designator -> parameter name -> value.
++    std::map<wxString, std::map<wxString, wxString>> paramVariations;
+ };
+ 
+ 
+diff --git a/eeschema/sch_io/altium/altium_parser_sch.cpp b/eeschema/sch_io/altium/altium_parser_sch.cpp
+index 3a21074a..1319f2cc 100644
+--- a/eeschema/sch_io/altium/altium_parser_sch.cpp
++++ b/eeschema/sch_io/altium/altium_parser_sch.cpp
+@@ -175,6 +175,9 @@ ASCH_SYMBOL::ASCH_SYMBOL( const std::map<wxString, wxString>& aProps )
+     displaymodecount = ALTIUM_PROPS_UTILS::ReadInt( aProps, "DISPLAYMODECOUNT", 0 );
+     m_indexInSheet = ALTIUM_PROPS_UTILS::ReadInt( aProps, "INDEXINSHEET", -1 );
+ 
++    componentkind = ReadEnum<ASCH_COMPONENT_KIND>( aProps, "COMPONENTKIND", 0, 6,
++                                                   ASCH_COMPONENT_KIND::STANDARD );
++
+     // DISPLAYMODE may be a string. Leave displaymode at 0 in this case.
+     displaymode = 0;
+     wxString displayModeStr = ALTIUM_PROPS_UTILS::ReadString( aProps, "DISPLAYMODE", "" );
+diff --git a/eeschema/sch_io/altium/altium_parser_sch.h b/eeschema/sch_io/altium/altium_parser_sch.h
+index c5bbea0c..4eece6b6 100644
+--- a/eeschema/sch_io/altium/altium_parser_sch.h
++++ b/eeschema/sch_io/altium/altium_parser_sch.h
+@@ -147,6 +147,19 @@ struct ASCH_BORDER_INTERFACE
+ };
+ 
+ 
++// Altium's TComponentKind
++enum class ASCH_COMPONENT_KIND
++{
++    STANDARD = 0,
++    MECHANICAL = 1,
++    GRAPHICAL = 2,
++    NET_TIE_BOM = 3,
++    NET_TIE_NO_BOM = 4,
++    STANDARD_NO_BOM = 5,
++    JUMPER = 6
++};
++
++
+ struct ASCH_SYMBOL
+ {
+     int      currentpartid;
+@@ -164,6 +177,8 @@ struct ASCH_SYMBOL
+     int displaymodecount;
+     int displaymode;
+ 
++    ASCH_COMPONENT_KIND componentkind;
++
+     explicit ASCH_SYMBOL( const std::map<wxString, wxString>& aProps );
+ };
+ 
+diff --git a/eeschema/sch_io/altium/sch_io_altium.cpp b/eeschema/sch_io/altium/sch_io_altium.cpp
+index b38b0265..4e8a43d8 100644
+--- a/eeschema/sch_io/altium/sch_io_altium.cpp
++++ b/eeschema/sch_io/altium/sch_io_altium.cpp
+@@ -516,6 +516,135 @@ SCH_SHEET* SCH_IO_ALTIUM::LoadSchematicProject( SCHEMATIC* aSchematic, const std
+ }
+ 
+ 
++namespace
++{
++/// The KiCad field an Altium parameter became (see SCH_IO_ALTIUM::ParseParameter), or empty.
++wxString altiumParamField( const SCH_SYMBOL& aSymbol, const wxString& aParam )
++{
++    wxString upper = aParam.Upper();
++
++    if( upper == wxS( "COMMENT" ) )
++        return aSymbol.GetField( FIELD_T::VALUE )->GetName();
++
++    if( upper == wxS( "DESCRIPTION" ) )
++        return aSymbol.GetField( FIELD_T::DESCRIPTION )->GetName();
++
++    if( upper == wxS( "VALUE" ) || upper == wxS( "FOOTPRINT" ) )
++        upper = wxS( "ALTIUM_" ) + upper;
++    else if( upper == wxS( "DATASHEET" ) && !aSymbol.GetField( wxS( "ALTIUM_DATASHEET" ) ) )
++        return aSymbol.GetField( FIELD_T::DATASHEET )->GetName();
++    else if( upper == wxS( "DATASHEET" ) )
++        upper = wxS( "ALTIUM_DATASHEET" );
++
++    return aSymbol.GetField( upper ) ? upper : wxString();
++}
++
++
++/// Apply one Altium variant's parameter overrides for a symbol to its KiCad variant.
++void applyAltiumParamVariations( const SCH_SYMBOL& aSymbol, const std::map<wxString, wxString>& aParams,
++                                 SCH_SYMBOL_VARIANT& aVariant )
++{
++    for( const auto& [name, value] : aParams )
++    {
++        wxString field = altiumParamField( aSymbol, name );
++
++        if( field.empty() )
++            continue; // Altium system parameters (Library Reference, Pin Info, ...) have no field
++
++        wxString text = value;
++
++        // "=Name" takes another parameter's value: the variant's own, else the symbol's.
++        if( text.StartsWith( wxS( "=" ) ) )
++        {
++            wxString source = text.Mid( 1 );
++            text = wxEmptyString;
++            bool found = false;
++
++            for( const auto& [otherName, otherValue] : aParams )
++            {
++                if( otherName.CmpNoCase( source ) == 0 )
++                {
++                    text = otherValue;
++                    found = true;
++                    break;
++                }
++            }
++
++            if( !found )
++            {
++                wxString sourceField = altiumParamField( aSymbol, source );
++
++                if( sourceField.empty() )
++                    continue;
++
++                text = aSymbol.GetField( sourceField )->GetText();
++            }
++        }
++
++        aVariant.m_Fields[field] = text;
++    }
++}
++
++
++/**
++ * A project import parses every document as a top-level sheet first, so the symbols of a
++ * document that turns out to be a sub-sheet carry their instance under that discarded sheet's
++ * path. Move each such instance to the path the sheet has in the final hierarchy, where
++ * variants and saving look for it.
++ */
++void rehomeSymbolInstances( SCH_SHEET* aRoot )
++{
++    SCH_SHEET_LIST     sheetList( aRoot );
++    std::set<wxString> validPaths;
++
++    for( const SCH_SHEET_PATH& path : sheetList )
++        validPaths.insert( path.Path().AsString() );
++
++    std::set<SCH_SYMBOL*> moved;
++
++    for( const SCH_SHEET_PATH& path : sheetList )
++    {
++        KIID_PATH realPath = path.Path();
++
++        for( SCH_ITEM* item : path.LastScreen()->Items().OfType( SCH_SYMBOL_T ) )
++        {
++            SCH_SYMBOL*         symbol = static_cast<SCH_SYMBOL*>( item );
++            SCH_SYMBOL_INSTANCE existing;
++
++            if( symbol->GetInstance( existing, realPath ) )
++                continue;
++
++            for( const SCH_SYMBOL_INSTANCE& instance : symbol->GetInstances() )
++            {
++                if( !validPaths.contains( instance.m_Path.AsString() ) )
++                {
++                    SCH_SYMBOL_INSTANCE rehomed = instance;
++                    rehomed.m_Path = realPath;
++                    symbol->AddHierarchicalReference( rehomed );
++                    moved.insert( symbol );
++                    break;
++                }
++            }
++        }
++    }
++
++    for( SCH_SYMBOL* symbol : moved )
++    {
++        std::vector<KIID_PATH> stale;
++
++        for( const SCH_SYMBOL_INSTANCE& instance : symbol->GetInstances() )
++        {
++            if( !validPaths.contains( instance.m_Path.AsString() ) )
++                stale.push_back( instance.m_Path );
++        }
++
++        for( const KIID_PATH& path : stale )
++            symbol->RemoveInstance( path );
++    }
++}
++} // namespace
++
++
+ SCH_SHEET* SCH_IO_ALTIUM::LoadSchematicFile( const wxString& aFileName, SCHEMATIC* aSchematic,
+                                              SCH_SHEET* aAppendToMe,
+                                              const std::map<std::string, UTF8>* aProperties )
+@@ -686,6 +815,7 @@ SCH_SHEET* SCH_IO_ALTIUM::LoadSchematicFile( const wxString& aFileName, SCHEMATI
+         }
+ 
+         m_rootSheet = &aSchematic->Root();
++        rehomeSymbolInstances( m_rootSheet );
+     }
+ 
+     if( !aFileName.empty() )
+@@ -792,12 +922,12 @@ SCH_SHEET* SCH_IO_ALTIUM::LoadSchematicFile( const wxString& aFileName, SCHEMATI
+                             applicable = varIt->second;
+                     }
+ 
+-                    if( applicable.empty() )
+-                        continue;
++                    std::map<wxString, SCH_SYMBOL_VARIANT> built;
+ 
+                     for( const auto& [variantName, entry] : applicable )
+                     {
+-                        SCH_SYMBOL_VARIANT variant( variantName );
++                        SCH_SYMBOL_VARIANT& variant = built.try_emplace( variantName, variantName )
++                                                              .first->second;
+                         variant.InitializeAttributes( *symbol );
+ 
+                         if( entry->kind == 1 )
+@@ -818,9 +948,28 @@ SCH_SHEET* SCH_IO_ALTIUM::LoadSchematicFile( const wxString& aFileName, SCHEMATI
+                                     variant.m_Fields[wxS( "Footprint" )] = value;
+                             }
+                         }
++                    }
+ 
+-                        symbol->AddVariant( path, variant );
++                    // Parameter overrides, named as ParseParameter names the fields.
++                    wxString ref = symbol->GetRef( &path );
++
++                    for( const ALTIUM_PROJECT_VARIANT& pv : variants )
++                    {
++                        auto paramsIt = pv.paramVariations.find( ref );
++
++                        if( paramsIt == pv.paramVariations.end() )
++                            continue;
++
++                        auto [variantIt, added] = built.try_emplace( pv.name, pv.name );
++
++                        if( added )
++                            variantIt->second.InitializeAttributes( *symbol );
++
++                        applyAltiumParamVariations( *symbol, paramsIt->second, variantIt->second );
+                     }
++
++                    for( auto& [variantName, variant] : built )
++                        symbol->AddVariant( path, variant );
+                 }
+             }
+         }
+@@ -2520,6 +2669,24 @@ void SCH_IO_ALTIUM::ParseComponent( int aIndex, const std::map<wxString, wxStrin
+ 
+     symbol->GetField( FIELD_T::DESCRIPTION )->SetText( elem.componentdescription );
+ 
++    // Altium leaves graphical components (title blocks, logos) out of the netlist, BOM and
++    // board, and the "no BOM" kinds out of the BOM.
++    switch( elem.componentkind )
++    {
++    case ASCH_COMPONENT_KIND::GRAPHICAL:
++        symbol->SetExcludedFromBoard( true );
++        symbol->SetExcludedFromSim( true );
++        KI_FALLTHROUGH;
++
++    case ASCH_COMPONENT_KIND::NET_TIE_NO_BOM:
++    case ASCH_COMPONENT_KIND::STANDARD_NO_BOM:
++        symbol->SetExcludedFromBOM( true );
++        break;
++
++    default:
++        break;
++    }
++
+     SCH_SCREEN* screen = getCurrentScreen();
+     wxCHECK( screen, /* void */ );
+ 
+@@ -5463,6 +5630,11 @@ void SCH_IO_ALTIUM::ParseParameter( const std::map<wxString, wxString>& aPropert
+         SCH_FIELD*  field = nullptr;
+         wxString    upperName = elem.name.Upper();
+ 
++        // '*' is Altium's "not set": a parameter holding it shows and compiles as empty. A
++        // Comment keeps it.
++        if( elem.text == wxT( "*" ) && upperName != wxT( "COMMENT" ) )
++            elem.text.Clear();
++
+         if( upperName == "COMMENT" )
+         {
+             field = symbol->GetField( FIELD_T::VALUE );
+@@ -5487,8 +5659,29 @@ void SCH_IO_ALTIUM::ParseParameter( const std::map<wxString, wxString>& aPropert
+             {
+                 fieldName = "ALTIUM_VALUE";
+             }
++            else if( fieldName == "FOOTPRINT" || fieldName == "DATASHEET"
++                     || fieldName == "DESCRIPTION" )
++            {
++                // These name KiCad's own fields, and a user field of the same name takes their
++                // place when the schematic is reopened. The footprint comes from the PCB model
++                // and the description from the component, as in Altium, where they hide a
++                // parameter of the same name; such a parameter is kept beside them. Altium has
++                // no datasheet field, so a Datasheet parameter fills KiCad's when it is empty.
++                SCH_FIELD* own = symbol->GetField( fieldName == "FOOTPRINT"   ? FIELD_T::FOOTPRINT
++                                                   : fieldName == "DATASHEET" ? FIELD_T::DATASHEET
++                                                                              : FIELD_T::DESCRIPTION );
++                wxString   text = AltiumSchSpecialStringsToKiCadVariables( elem.text, variableMap );
++
++                if( fieldName == "DATASHEET" && own->GetText().IsEmpty() )
++                    field = own;
++                else if( own->GetText() == text )
++                    return;
++                else
++                    fieldName = "ALTIUM_" + fieldName;
++            }
+ 
+-            field = symbol->AddField( SCH_FIELD( symbol, FIELD_T::USER, fieldName ) );
++            if( !field )
++                field = symbol->AddField( SCH_FIELD( symbol, FIELD_T::USER, fieldName ) );
+         }
+ 
+         wxString kicadText = AltiumSchSpecialStringsToKiCadVariables( elem.text, variableMap );
+diff --git a/pcbnew/pcb_io/altium/altium_pcb.cpp b/pcbnew/pcb_io/altium/altium_pcb.cpp
+index 7cccef68..0ef7833d 100644
+--- a/pcbnew/pcb_io/altium/altium_pcb.cpp
++++ b/pcbnew/pcb_io/altium/altium_pcb.cpp
+@@ -1781,10 +1781,12 @@ void ALTIUM_PCB::ParseComponents6Data( const ALTIUM_PCB_COMPOUND_FILE& aAltiumPc
+         wxFileName libName( elem.sourcefootprintlibrary, wxPATH_WIN );
+ 
+         // The pattern field may also contain a path when Altium stores it with a full library path.
+-        // Extract just the footprint name portion to avoid creating invalid filenames.
++        // Extract just the footprint name portion to avoid creating invalid filenames. Altium
++        // paths use backslashes; a '/' alone is part of the name (e.g. "CAP 0805/2012"), which the
++        // schematic keeps too, so cutting at it would make board and schematic disagree.
+         wxString fpName = elem.pattern;
+ 
+-        if( fpName.Contains( wxT( "\\" ) ) || fpName.Contains( wxT( "/" ) ) )
++        if( fpName.Contains( wxT( "\\" ) ) )
+         {
+             wxFileName fpPath( fpName, wxPATH_WIN );
+             fpName = fpPath.GetFullName();

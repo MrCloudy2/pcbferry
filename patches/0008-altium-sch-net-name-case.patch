@@ -1,0 +1,102 @@
+diff --git a/eeschema/sch_io/altium/sch_io_altium.cpp b/eeschema/sch_io/altium/sch_io_altium.cpp
+index 11e83b26..0abbba66 100644
+--- a/eeschema/sch_io/altium/sch_io_altium.cpp
++++ b/eeschema/sch_io/altium/sch_io_altium.cpp
+@@ -91,6 +91,7 @@
+ // AltiumDeriveSheetName below.
+ wxString AltiumWrapBusLabel( const wxString& aText );
+ static void matchSheetPinsToHarnessPorts( SCH_SHEET* aTop );
++static void unifyNetNameCase( const std::vector<SCH_SHEET*>& aTopSheets );
+ static wxString harnessName( const wxString& aName );
+ static wxString harnessType( const wxString& aType );
+ wxString AltiumDeriveSheetName( const wxString& aFilename, const std::set<wxString>& aExistingNames );
+@@ -606,6 +607,8 @@ SCH_SHEET* SCH_IO_ALTIUM::LoadSchematicFile( const wxString& aFileName, SCHEMATI
+         for( SCH_SHEET* sheet : topLevelSheets )
+             matchSheetPinsToHarnessPorts( sheet );
+ 
++        unifyNetNameCase( topLevelSheets );
++
+         // Ports are imported as hierarchical labels and net labels as local labels. Which of
+         // them connect across sheets in Altium depends on the project's net identifier scope.
+         ALTIUM_NET_SCOPE scope = ALTIUM_NET_SCOPE::AUTOMATIC;
+@@ -680,7 +683,10 @@ SCH_SHEET* SCH_IO_ALTIUM::LoadSchematicFile( const wxString& aFileName, SCHEMATI
+     }
+ 
+     if( !aFileName.empty() )
++    {
+         matchSheetPinsToHarnessPorts( m_rootSheet );
++        unifyNetNameCase( { m_rootSheet } );
++    }
+ 
+     if( !aAppendToMe )
+         NormalizeRepeatedSheetInstances();
+@@ -1312,6 +1318,69 @@ static void matchSheetPinsToHarnessPorts( SCH_SHEET* aTop )
+ }
+ 
+ 
++// Altium compares net names without regard to case ("RX signal" and "RX SIGNAL" are one net);
++// KiCad does not. Give every net label, port and sheet pin that differs only in case the
++// spelling met first. Labels holding harness groups are left alone.
++static void unifyNetNameCase( const std::vector<SCH_SHEET*>& aTopSheets )
++{
++    std::vector<SCH_TEXT*>       named;
++    std::set<SCH_SCREEN*>        seen;
++
++    for( SCH_SHEET* top : aTopSheets )
++    {
++        SCH_SCREENS screens( top );
++
++        for( SCH_SCREEN* screen = screens.GetFirst(); screen; screen = screens.GetNext() )
++        {
++            if( !seen.insert( screen ).second )
++                continue;
++
++            for( SCH_ITEM* item : screen->Items() )
++            {
++                switch( item->Type() )
++                {
++                case SCH_LABEL_T:
++                case SCH_GLOBAL_LABEL_T:
++                case SCH_HIER_LABEL_T:
++                    named.push_back( static_cast<SCH_TEXT*>( item ) );
++                    break;
++
++                case SCH_SHEET_T:
++                    for( SCH_SHEET_PIN* pin : static_cast<SCH_SHEET*>( item )->GetPins() )
++                        named.push_back( pin );
++
++                    break;
++
++                default:
++                    break;
++                }
++            }
++        }
++    }
++
++    std::map<wxString, wxString> spelling;
++
++    for( SCH_TEXT* text : named )
++    {
++        if( text->GetText().Contains( wxT( "{" ) ) )
++            continue;
++
++        spelling.try_emplace( text->GetText().Upper(), text->GetText() );
++    }
++
++    for( SCH_TEXT* text : named )
++    {
++        if( text->GetText().Contains( wxT( "{" ) ) )
++            continue;
++
++        const wxString& canonical = spelling[text->GetText().Upper()];
++
++        if( canonical != text->GetText() )
++            text->SetText( canonical );
++    }
++}
++
++
+ // Altium harness names and types may contain spaces ("DRIVER DIGITAL INPUT"), which KiCad bus
+ // groups use as separators, and Altium matches types regardless of case. Use one KiCad-safe
+ // spelling everywhere a harness name or type ends up in a label.
