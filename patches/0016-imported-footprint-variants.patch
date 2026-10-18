@@ -1,0 +1,831 @@
+diff --git a/eeschema/eeschema_jobs_handler.cpp b/eeschema/eeschema_jobs_handler.cpp
+index c9056e37..47c2b1e3 100644
+--- a/eeschema/eeschema_jobs_handler.cpp
++++ b/eeschema/eeschema_jobs_handler.cpp
+@@ -56,6 +56,7 @@
+ #include <sch_commit.h>
+ #include <project/project_file.h>
+ #include <wx/ffile.h>
++#include <wx/regex.h>
+ #include <sch_io/sch_io_mgr.h>
+ #include <tool/tool_manager.h>
+ #include <kiface_base.h>
+@@ -1832,6 +1833,65 @@ void linkImportedSymbols( SCHEMATIC& aSchematic, PROJECT* aProject, const wxStri
+         symbol->SetLibId( LIB_ID( aCacheNickname, name ) );
+     }
+ }
++
++
++/**
++ * Footprint library ids by reference, read from a KiCad board file. Altium's board is where its
++ * footprints live, so once the board is imported, symbols take their footprint from it.
++ */
++std::map<wxString, wxString> boardFootprintsByReference( const wxString& aBoardFile )
++{
++    std::map<wxString, wxString> out;
++    wxFFile                      file( aBoardFile, wxS( "rb" ) );
++    wxString                     text;
++
++    if( !file.IsOpened() || !file.ReadAll( &text, wxConvUTF8 ) )
++        return out;
++
++    // A quoted S-expression string starting at aPos (just after the opening quote)
++    auto readString = [&]( size_t aPos ) -> wxString
++    {
++        wxString value;
++
++        for( size_t i = aPos; i < text.length(); ++i )
++        {
++            wxUniChar c = text[i];
++
++            if( c == '\\' && i + 1 < text.length() )
++                value += text[++i];
++            else if( c == '"' )
++                break;
++            else
++                value += c;
++        }
++
++        return value;
++    };
++
++    const wxString footprintTag = wxS( "\n\t(footprint \"" );
++    const wxString referenceTag = wxS( "(property \"Reference\" \"" );
++    size_t         pos = text.find( footprintTag );
++
++    while( pos != wxString::npos )
++    {
++        size_t   idStart = pos + footprintTag.length();
++        wxString fpid = readString( idStart );
++        size_t   next = text.find( footprintTag, idStart );
++        size_t   ref = text.find( referenceTag, idStart );
++
++        if( ref != wxString::npos && ( next == wxString::npos || ref < next ) )
++        {
++            wxString reference = readString( ref + referenceTag.length() );
++
++            if( !reference.IsEmpty() )
++                out.emplace( reference, fpid );
++        }
++
++        pos = next;
++    }
++
++    return out;
++}
+ } // namespace
+ 
+ 
+@@ -2026,6 +2086,45 @@ int EESCHEMA_JOBS_HANDLER::JobSchImport( JOB* aJob )
+             }
+         }
+ 
++        // With the board already imported into this project, every symbol takes the footprint
++        // its board part has: same library entry, including per-form variants of one name.
++        wxFileName boardFn( outputFn );
++        boardFn.SetExt( FILEEXT::KiCadPcbFileExtension );
++
++        if( boardFn.FileExists() )
++        {
++            std::map<wxString, wxString> boardFootprints = boardFootprintsByReference( boardFn.GetFullPath() );
++            SCH_SHEET_LIST               paths = schematic->Hierarchy();
++            std::set<SCH_SYMBOL*>        done;
++
++            for( const SCH_SHEET_PATH& path : paths )
++            {
++                for( SCH_ITEM* item : path.LastScreen()->Items().OfType( SCH_SYMBOL_T ) )
++                {
++                    SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
++                    auto        it = boardFootprints.find( symbol->GetRef( &path ) );
++
++                    // A symbol shared by several sheet instances has one footprint field
++                    if( it == boardFootprints.end() || !done.insert( symbol ).second )
++                        continue;
++
++                    // Only the library entry changes: where the board places another footprint
++                    // than the schematic names (a design not synchronised), the schematic keeps
++                    // its own.
++                    LIB_ID mine, theirs;
++                    mine.Parse( symbol->GetField( FIELD_T::FOOTPRINT )->GetText(), true );
++                    theirs.Parse( it->second, true );
++
++                    wxString theirName = theirs.GetUniStringLibItemName();
++                    wxRegEx  variant( wxS( " \\([0-9]+\\)$" ) );
++                    variant.ReplaceFirst( &theirName, wxEmptyString );
++
++                    if( theirName == mine.GetUniStringLibItemName() )
++                        symbol->GetField( FIELD_T::FOOTPRINT )->SetText( it->second );
++                }
++            }
++        }
++
+         linkImportedSymbols( *schematic, project,
+                              LIB_ID::FixIllegalChars( outputFn.GetName() + wxS( "-import-syms" ), true ).wx_str(),
+                              importReporter );
+diff --git a/pcbnew/pcb_io/altium/altium_pcb.cpp b/pcbnew/pcb_io/altium/altium_pcb.cpp
+index ae1c3d6d..77fd31a3 100644
+--- a/pcbnew/pcb_io/altium/altium_pcb.cpp
++++ b/pcbnew/pcb_io/altium/altium_pcb.cpp
+@@ -4426,6 +4426,16 @@ void ALTIUM_PCB::ConvertPads6ToFootprintItemOnCopper( FOOTPRINT* aFootprint, con
+     pad->SetPadToDieLength( aElem.pad_to_die_length );
+     pad->SetPadToDieDelay( aElem.pad_to_die_delay );
+ 
++    // Altium describes a bare hole with a zero-size pad; in KiCad the pad is then the hole itself
++    // (a zero size is pinned to 1 um with a warning, which stops footprint libraries from loading)
++    if( pad->GetAttribute() == PAD_ATTRIB::NPTH || pad->GetAttribute() == PAD_ATTRIB::PTH )
++    {
++        VECTOR2I size = pad->GetSize( PADSTACK::ALL_LAYERS );
++
++        if( ( size.x <= 0 || size.y <= 0 ) && pad->GetDrillSize().x > 0 )
++            pad->SetSize( PADSTACK::ALL_LAYERS, pad->GetDrillSize() );
++    }
++
+     aFootprint->Add( pad.release(), ADD_MODE::APPEND );
+ }
+ 
+diff --git a/pcbnew/pcbnew_jobs_handler.cpp b/pcbnew/pcbnew_jobs_handler.cpp
+index cacb93fa..317384d1 100644
+--- a/pcbnew/pcbnew_jobs_handler.cpp
++++ b/pcbnew/pcbnew_jobs_handler.cpp
+@@ -20,6 +20,7 @@
+ 
+ #include <wx/crt.h>
+ #include <wx/dir.h>
++#include <wx/fileconf.h>
+ #include <wx/zipstrm.h>
+ #include <wx/filename.h>
+ #include <wx/tokenzr.h>
+@@ -2818,6 +2819,627 @@ public:
+ } // namespace
+ 
+ 
++// The library parity check's pad comparison (drc_test_provider_library_parity.cpp)
++bool padNeedsUpdate( const PAD* a, const PAD* bLib, REPORTER* aReporter );
++
++
++namespace
++{
++// Altium rounds a rotated or mirrored component's primitives when it stores them, so placed
++// copies of one footprint differ from its definition by tens of nanometres, which KiCad's library
++// parity check (no tolerance) reports as a different footprint.
++constexpr int IMPORT_TOLERANCE = 50; // nm
++
++
++bool nearPt( const VECTOR2I& a, const VECTOR2I& b )
++{
++    return std::abs( a.x - b.x ) <= IMPORT_TOLERANCE && std::abs( a.y - b.y ) <= IMPORT_TOLERANCE;
++}
++
++
++std::vector<VECTOR2I> keyPoints( const BOARD_ITEM* aItem )
++{
++    std::vector<VECTOR2I> pts;
++
++    if( const PCB_SHAPE* shape = dynamic_cast<const PCB_SHAPE*>( aItem ) )
++    {
++        switch( shape->GetShape() )
++        {
++        case SHAPE_T::ARC:
++            pts = { shape->GetStart(), shape->GetArcMid(), shape->GetEnd() };
++            break;
++
++        case SHAPE_T::POLY:
++            for( auto it = shape->GetPolyShape().CIterateWithHoles(); it; ++it )
++                pts.push_back( *it );
++
++            break;
++
++        case SHAPE_T::BEZIER:
++            pts = { shape->GetStart(), shape->GetBezierC1(), shape->GetBezierC2(), shape->GetEnd() };
++            break;
++
++        default:
++            pts = { shape->GetStart(), shape->GetEnd() };
++            break;
++        }
++
++        pts.emplace_back( shape->GetWidth(), 0 );
++    }
++    else if( const PCB_TEXT* text = dynamic_cast<const PCB_TEXT*>( aItem ) )
++    {
++        pts = { text->GetPosition() };
++    }
++
++    return pts;
++}
++
++
++bool sameWithin( const BOARD_ITEM* a, const BOARD_ITEM* b )
++{
++    if( a->Type() != b->Type() || a->GetLayer() != b->GetLayer() )
++        return false;
++
++    const PCB_SHAPE* sa = dynamic_cast<const PCB_SHAPE*>( a );
++    const PCB_SHAPE* sb = dynamic_cast<const PCB_SHAPE*>( b );
++
++    if( sa && sb && sa->GetShape() != sb->GetShape() )
++        return false;
++
++    const PCB_TEXT* ta = dynamic_cast<const PCB_TEXT*>( a );
++    const PCB_TEXT* tb = dynamic_cast<const PCB_TEXT*>( b );
++
++    if( ta && tb && ta->GetText() != tb->GetText() )
++        return false;
++
++    std::vector<VECTOR2I> pa = keyPoints( a ), pb = keyPoints( b );
++
++    if( pa.size() != pb.size() )
++        return false;
++
++    for( size_t i = 0; i < pa.size(); ++i )
++    {
++        if( !nearPt( pa[i], pb[i] ) )
++            return false;
++    }
++
++    return true;
++}
++
++
++/// A placed footprint as it is saved to a library (PCB_IO_KICAD_SEXPR::FootprintSave()).
++std::unique_ptr<FOOTPRINT> libraryForm( const FOOTPRINT& aPlaced )
++{
++    std::unique_ptr<FOOTPRINT> lib( static_cast<FOOTPRINT*>( aPlaced.Clone() ) );
++
++    lib->SetOrientation( ANGLE_0 );
++
++    if( lib->GetLayer() != F_Cu )
++        lib->Flip( lib->GetPosition(), FLIP_DIRECTION::TOP_BOTTOM );
++
++    lib->SetPosition( { 0, 0 } );
++    lib->SetParent( nullptr );
++    return lib;
++}
++
++
++/// A library footprint placed as FOOTPRINT::FootprintNeedsUpdate() places it on an instance.
++/// The result has \a aBoard as parent: detach it (SetParent( nullptr )) before destroying it.
++std::unique_ptr<FOOTPRINT> placeLike( const FOOTPRINT& aLib, const FOOTPRINT& aInstance, BOARD* aBoard )
++{
++    std::unique_ptr<FOOTPRINT> placed( static_cast<FOOTPRINT*>( aLib.Clone() ) );
++    placed->SetParent( aBoard );
++
++    if( aInstance.IsFlipped() != placed->IsFlipped() )
++        placed->Flip( { 0, 0 }, FLIP_DIRECTION::TOP_BOTTOM );
++
++    placed->SetPosition( aInstance.GetPosition() );
++    placed->SetOrientation( aInstance.GetOrientation() );
++
++    for( BOARD_ITEM* item : placed->GraphicalItems() )
++        item->NormalizeForCompare();
++
++    return placed;
++}
++
++
++/// Whether \a aInstance matches \a aPlaced within IMPORT_TOLERANCE: same items (in any order),
++/// layers and texts, pads by number and position, zones. Fills \a aPadPairs when given.
++bool matchesWithin( const FOOTPRINT& aInstance, const FOOTPRINT& aPlaced, std::map<PAD*, PAD*>* aPadPairs )
++{
++    const auto& mine = aInstance.GraphicalItems();
++    const auto& theirs = aPlaced.GraphicalItems();
++
++    if( mine.size() != theirs.size() || aInstance.Pads().size() != aPlaced.Pads().size()
++        || aInstance.Zones().size() != aPlaced.Zones().size() )
++    {
++        return false;
++    }
++
++    std::vector<BOARD_ITEM*> unused( theirs.begin(), theirs.end() );
++
++    for( BOARD_ITEM* item : mine )
++    {
++        std::unique_ptr<BOARD_ITEM> normal( static_cast<BOARD_ITEM*>( item->Clone() ) );
++        normal->NormalizeForCompare();
++
++        auto it = std::find_if( unused.begin(), unused.end(),
++                                [&]( BOARD_ITEM* aOther ) { return sameWithin( normal.get(), aOther ); } );
++
++        if( it == unused.end() )
++            return false;
++
++        unused.erase( it );
++    }
++
++    std::vector<PAD*> unusedPads( aPlaced.Pads().begin(), aPlaced.Pads().end() );
++
++    for( PAD* a : aInstance.Pads() )
++    {
++        // The pad takes the library pad's position and orientation (takeGeometry()); everything
++        // else the library parity check compares must already agree. Altium may store a
++        // symmetric pad turned by 180 degrees: the same copper, so a different orientation is
++        // accepted when the pad outlines are the same shape.
++        auto sameOutline = [&]( const PAD* x, const PAD* y )
++        {
++            PCB_LAYER_ID layer = x->GetLayerSet().ExtractLayer();
++
++            if( layer == UNDEFINED_LAYER || !IsCopperLayer( layer ) )
++                layer = F_Cu;
++
++            const std::shared_ptr<SHAPE_POLY_SET>& px = x->GetEffectivePolygon( layer, ERROR_INSIDE );
++            const std::shared_ptr<SHAPE_POLY_SET>& py = y->GetEffectivePolygon( layer, ERROR_INSIDE );
++            SHAPE_POLY_SET                         difference;
++            difference.BooleanXor( *px, *py );
++
++            double perimeter = 0.0;
++
++            for( int o = 0; o < px->OutlineCount(); ++o )
++                perimeter += px->COutline( o ).Length();
++
++            return difference.Area() <= 2.0 * ARC_HIGH_DEF * perimeter;
++        };
++
++        auto it = std::find_if( unusedPads.begin(), unusedPads.end(),
++                                [&]( PAD* b )
++                                {
++                                    if( a->GetNumber() != b->GetNumber()
++                                        || !nearPt( a->GetPosition(), b->GetPosition() ) )
++                                    {
++                                        return false;
++                                    }
++
++                                    std::unique_ptr<PAD> moved( static_cast<PAD*>( a->Clone() ) );
++                                    moved->SetPosition( b->GetPosition() );
++                                    moved->SetOrientation( b->GetOrientation() );
++
++                                    // Both ways: the check walks only the first pad's layers
++                                    if( padNeedsUpdate( moved.get(), b, nullptr )
++                                        || padNeedsUpdate( b, moved.get(), nullptr ) )
++                                    {
++                                        return false;
++                                    }
++
++                                    return a->GetOrientation() == b->GetOrientation() || sameOutline( a, b );
++                                } );
++
++        if( it == unusedPads.end() )
++            return false;
++
++        if( aPadPairs )
++            ( *aPadPairs )[a] = *it;
++
++        unusedPads.erase( it );
++    }
++
++    // Keepouts drawn as tracks and arcs become polygons in each placement's own orientation, so
++    // their arc approximations differ: compare zones as shapes, to the approximation error.
++    for( size_t i = 0; i < aInstance.Zones().size(); ++i )
++    {
++        const ZONE* a = aInstance.Zones()[i];
++        const ZONE* b = aPlaced.Zones()[i];
++
++        if( a->GetLayerSet() != b->GetLayerSet() || a->GetIsRuleArea() != b->GetIsRuleArea() )
++            return false;
++
++        SHAPE_POLY_SET difference;
++        difference.BooleanXor( *a->Outline(), *b->Outline() );
++
++        double perimeter = 0.0;
++
++        for( int o = 0; o < a->Outline()->OutlineCount(); ++o )
++            perimeter += a->Outline()->COutline( o ).Length();
++
++        if( difference.Area() > 2.0 * ARC_HIGH_DEF * perimeter )
++            return false;
++    }
++
++    return true;
++}
++
++
++/// Give \a aInstance the geometry of \a aPlaced (which matches it within tolerance).
++void takeGeometry( FOOTPRINT& aInstance, const FOOTPRINT& aPlaced, const std::map<PAD*, PAD*>& aPadPairs )
++{
++    std::vector<BOARD_ITEM*> old( aInstance.GraphicalItems().begin(), aInstance.GraphicalItems().end() );
++
++    for( BOARD_ITEM* item : old )
++    {
++        aInstance.Remove( item );
++        delete item;
++    }
++
++    for( BOARD_ITEM* item : aPlaced.GraphicalItems() )
++    {
++        BOARD_ITEM* copy = static_cast<BOARD_ITEM*>( item->Clone() );
++        const_cast<KIID&>( copy->m_Uuid ) = KIID();
++        aInstance.Add( copy, ADD_MODE::APPEND );
++    }
++
++    for( const auto& [mine, theirs] : aPadPairs )
++    {
++        mine->SetPosition( theirs->GetPosition() );
++        mine->SetOrientation( theirs->GetOrientation() );
++    }
++
++    for( size_t i = 0; i < aInstance.Zones().size(); ++i )
++        *aInstance.Zones()[i]->Outline() = *aPlaced.Zones()[i]->Outline();
++}
++
++
++/**
++ * An Altium board can hold different footprints under one name (library revisions, parts
++ * edited on the board). Group the placed footprints of each name by what they are, within
++ * IMPORT_TOLERANCE; the largest group keeps the name and the others become "<name> (2)", ...
++ * Returns one definition per resulting name, for the library reconciliation.
++ */
++std::vector<std::unique_ptr<FOOTPRINT>> splitFootprintVariants( BOARD* aBoard, REPORTER& aReporter )
++{
++    std::map<wxString, std::vector<FOOTPRINT*>> byName;
++
++    for( FOOTPRINT* fp : aBoard->Footprints() )
++    {
++        wxString name = fp->GetFPID().GetUniStringLibItemName();
++
++        if( !name.IsEmpty() )
++            byName[name].push_back( fp );
++    }
++
++    // Front-side, unrotated copies make the cleanest definitions: consider them first
++    auto rank = []( const FOOTPRINT* aFp )
++    {
++        return ( aFp->IsFlipped() ? 2 : 0 ) + ( aFp->GetOrientation().IsZero() ? 0 : 1 );
++    };
++
++    std::vector<std::unique_ptr<FOOTPRINT>> definitions;
++
++    for( auto& [name, instances] : byName )
++    {
++        std::stable_sort( instances.begin(), instances.end(),
++                          [&]( FOOTPRINT* a, FOOTPRINT* b ) { return rank( a ) < rank( b ); } );
++
++        struct GROUP
++        {
++            std::unique_ptr<FOOTPRINT> definition; // library form
++            std::vector<FOOTPRINT*>    members;
++        };
++
++        std::vector<GROUP> groups;
++
++        for( FOOTPRINT* fp : instances )
++        {
++            GROUP* home = nullptr;
++
++            for( GROUP& group : groups )
++            {
++                std::unique_ptr<FOOTPRINT> placed = placeLike( *group.definition, *fp, aBoard );
++                bool                       same = matchesWithin( *fp, *placed, nullptr );
++                placed->SetParent( nullptr );
++
++                if( same )
++                {
++                    home = &group;
++                    break;
++                }
++            }
++
++            if( !home )
++            {
++                groups.push_back( { libraryForm( *fp ), {} } );
++                home = &groups.back();
++            }
++
++            home->members.push_back( fp );
++        }
++
++        std::stable_sort( groups.begin(), groups.end(),
++                          []( const GROUP& a, const GROUP& b ) { return a.members.size() > b.members.size(); } );
++
++        for( size_t g = 0; g < groups.size(); ++g )
++        {
++            wxString groupName = g == 0 ? name : wxString::Format( wxS( "%s (%zu)" ), name, g + 1 );
++
++            for( FOOTPRINT* fp : groups[g].members )
++            {
++                LIB_ID id = fp->GetFPID();
++                id.SetLibItemName( groupName );
++                fp->SetFPID( id );
++            }
++
++            // Already in library form: saving then has nothing to turn or flip (it would flip
++            // by the user's flip direction, not the way the parity check flips)
++            definitions.push_back( libraryForm( *groups[g].members.front() ) );
++        }
++
++        if( groups.size() > 1 )
++        {
++            aReporter.Report( wxString::Format( _( "Footprint '%s' is placed in %zu different forms; "
++                                                   "each has its own library entry." ),
++                                                name, groups.size() ),
++                              RPT_SEVERITY_INFO );
++        }
++    }
++
++    return definitions;
++}
++
++
++/**
++ * An Altium board's project (a .PrjPcb next to it listing it) names the footprint libraries the
++ * board's parts come from. Copy them into the KiCad project and register them, as the interactive
++ * project import does, so placed footprints link to them.
++ */
++void registerAltiumBoardLibraries( const wxFileName& aBoardFile, const wxString& aProjectDir,
++                                   REPORTER& aReporter )
++{
++    // The project usually sits next to the board, sometimes one folder up
++    std::vector<wxFileName> candidates;
++    wxFileName              board( aBoardFile );
++    board.MakeAbsolute(); // wxFileConfig reads a relative path from the user's home folder
++    wxFileName              parent( board.GetPath(), wxEmptyString );
++    parent.RemoveLastDir();
++
++    for( const wxString& folder : { board.GetPath(), parent.GetPath() } )
++    {
++        wxDir    dir( folder );
++        wxString name;
++
++        for( bool more = dir.IsOpened() && dir.GetFirst( &name, wxS( "*" ), wxDIR_FILES ); more;
++             more = dir.GetNext( &name ) )
++        {
++            if( wxFileName( name ).GetExt().CmpNoCase( wxS( "PrjPcb" ) ) == 0 )
++                candidates.emplace_back( folder, name );
++        }
++    }
++
++    for( const wxFileName& prjFn : candidates )
++    {
++
++        wxFileConfig config( wxEmptyString, wxEmptyString, wxEmptyString, prjFn.GetFullPath(),
++                             wxCONFIG_USE_NO_ESCAPE_CHARACTERS );
++
++        std::vector<wxFileName> libs;
++        bool                    listsBoard = false;
++        wxString                group;
++        long                    index;
++
++        for( bool g = config.GetFirstGroup( group, index ); g; g = config.GetNextGroup( group, index ) )
++        {
++            if( !group.StartsWith( wxS( "Document" ) ) )
++                continue;
++
++            wxFileName fn( config.Read( group + wxS( "/DocumentPath" ), wxEmptyString ), wxPATH_WIN );
++
++            if( fn.GetFullName().CmpNoCase( board.GetFullName() ) == 0 )
++                listsBoard = true;
++
++            wxString ext = fn.GetExt().Lower();
++
++            if( ext == wxS( "pcblib" ) || ext == wxS( "intlib" ) )
++            {
++                if( !fn.IsAbsolute() )
++                    fn.MakeAbsolute( prjFn.GetPath() );
++
++                libs.push_back( fn );
++            }
++        }
++
++        if( !listsBoard )
++            continue;
++
++        std::optional<LIBRARY_TABLE*> table =
++                Pgm().GetLibraryManager().Table( LIBRARY_TABLE_TYPE::FOOTPRINT, LIBRARY_TABLE_SCOPE::PROJECT );
++
++        if( !table )
++            return;
++
++        for( const wxFileName& lib : libs )
++        {
++            if( !lib.FileExists() || lib.GetSize() == 0 )
++                continue;
++
++            wxFileName copy( aProjectDir, lib.GetFullName() );
++
++            if( copy.GetFullPath() != lib.GetFullPath() )
++                wxCopyFile( lib.GetFullPath(), copy.GetFullPath(), true );
++
++            if( !( *table )->HasRow( lib.GetName() ) )
++            {
++                LIBRARY_TABLE_ROW& row = ( *table )->InsertRow();
++                row.SetNickname( lib.GetName() );
++                row.SetURI( wxS( "${KIPRJMOD}/" ) + lib.GetFullName() );
++                row.SetType( PCB_IO_MGR::ShowType( PCB_IO_MGR::ALTIUM_DESIGNER ) );
++            }
++        }
++
++        ( *table )->Save().map_error(
++                [&]( const LIBRARY_ERROR& aError )
++                {
++                    aReporter.Report( _( "Error saving project library table: " ) + aError.message,
++                                      RPT_SEVERITY_ERROR );
++                } );
++        return;
++    }
++}
++
++
++/**
++ * Give every placed footprint that matches its library footprint within IMPORT_TOLERANCE the
++ * library geometry, placed exactly as the parity check places it. A footprint linked to one of
++ * the project's own libraries whose library version differs from what is placed (a library
++ * changed since, or one KiCad reads with other layer meanings than the board's) is put in the
++ * import library instead, as placed, the way symbols are. Returns how many changed.
++ */
++int conformFootprintsToLibrary( BOARD* aBoard, FOOTPRINT_LIBRARY_ADAPTER& aAdapter,
++                                const wxString& aCacheNickname, const wxString& aCachePath,
++                                REPORTER& aReporter )
++{
++    std::map<wxString, std::unique_ptr<FOOTPRINT>> libraryFootprints;
++
++    auto libraryFor = [&]( const LIB_ID& aId ) -> const FOOTPRINT*
++    {
++        wxString key = aId.Format().wx_str();
++
++        if( !libraryFootprints.count( key ) )
++        {
++            FOOTPRINT* loaded = nullptr;
++
++            try
++            {
++                if( aId.GetUniStringLibNickname() == aCacheNickname )
++                {
++                    // Written in this run: the adapter does not know the row yet
++                    IO_RELEASER<PCB_IO> io( PCB_IO_MGR::FindPlugin( PCB_IO_MGR::KICAD_SEXP ) );
++                    loaded = io->FootprintLoad( aCachePath, aId.GetUniStringLibItemName(), false );
++                }
++                else
++                {
++                    if( !aAdapter.GetLibraryStatus( aId.GetUniStringLibNickname() ) )
++                        aAdapter.LoadOne( aId.GetUniStringLibNickname() );
++
++                    loaded = aAdapter.LoadFootprint( aId, false );
++                }
++            }
++            catch( ... )
++            {
++                // a library that cannot be read: leave its footprints as they are
++            }
++
++            libraryFootprints[key].reset( loaded );
++        }
++
++        return libraryFootprints[key].get();
++    };
++
++    auto matchesLibrary = [&]( FOOTPRINT* aFp, const FOOTPRINT* aLib, std::map<PAD*, PAD*>* aPairs )
++    {
++        if( !aFp->FootprintNeedsUpdate( aLib, BOARD_ITEM::COMPARE_FLAGS::DRC ) )
++            return true;
++
++        std::unique_ptr<FOOTPRINT> placed = placeLike( *aLib, *aFp, aBoard );
++        bool                       same = matchesWithin( *aFp, *placed, aPairs );
++        placed->SetParent( nullptr );
++        return same;
++    };
++
++    // Project library entries that do not hold what is placed
++    std::map<wxString, FOOTPRINT*> moveToCache; // lib id -> a placed copy
++
++    for( FOOTPRINT* fp : aBoard->Footprints() )
++    {
++        const LIB_ID& id = fp->GetFPID();
++
++        if( !id.IsValid() || id.GetUniStringLibNickname() == aCacheNickname )
++            continue;
++
++        const FOOTPRINT* lib = libraryFor( id );
++
++        if( lib && !matchesLibrary( fp, lib, nullptr ) )
++            moveToCache.emplace( id.Format().wx_str(), fp );
++    }
++
++    if( !moveToCache.empty() )
++    {
++        try
++        {
++            IO_RELEASER<PCB_IO> io( PCB_IO_MGR::FindPlugin( PCB_IO_MGR::KICAD_SEXP ) );
++
++            if( !wxDir::Exists( aCachePath ) )
++                io->CreateLibrary( aCachePath );
++
++            for( auto& [key, fp] : moveToCache )
++            {
++                std::unique_ptr<FOOTPRINT> copy( static_cast<FOOTPRINT*>( fp->Clone() ) );
++                LIB_ID                     id = copy->GetFPID();
++                id.SetLibNickname( aCacheNickname );
++                copy->SetFPID( id );
++                copy->SetReference( wxS( "REF**" ) );
++                io->FootprintSave( aCachePath, copy.get() );
++            }
++
++            std::optional<LIBRARY_TABLE*> table =
++                    Pgm().GetLibraryManager().Table( LIBRARY_TABLE_TYPE::FOOTPRINT, LIBRARY_TABLE_SCOPE::PROJECT );
++
++            if( table && !( *table )->HasRow( aCacheNickname ) )
++            {
++                LIBRARY_TABLE_ROW& row = ( *table )->InsertRow();
++                row.SetNickname( aCacheNickname );
++                row.SetURI( wxS( "${KIPRJMOD}/" ) + wxFileName( aCachePath, wxEmptyString ).GetDirs().Last() );
++                row.SetType( wxS( "KiCad" ) );
++                row.SetOptions( FOOTPRINT_IMPORT_RECONCILER::ManagedCacheOption() );
++                ( *table )->Save();
++            }
++
++            for( FOOTPRINT* fp : aBoard->Footprints() )
++            {
++                if( moveToCache.count( fp->GetFPID().Format().wx_str() ) )
++                {
++                    LIB_ID id = fp->GetFPID();
++                    id.SetLibNickname( aCacheNickname );
++                    fp->SetFPID( id );
++                }
++            }
++        }
++        catch( const IO_ERROR& ioe )
++        {
++            aReporter.Report( wxString::Format( _( "Could not add footprints to the import library: %s" ),
++                                                ioe.What() ),
++                              RPT_SEVERITY_WARNING );
++        }
++    }
++
++    int conformed = 0;
++
++    for( FOOTPRINT* fp : aBoard->Footprints() )
++    {
++        const LIB_ID& id = fp->GetFPID();
++
++        if( !id.IsValid() )
++            continue;
++
++        const FOOTPRINT* lib = libraryFor( id );
++
++        if( !lib || !fp->FootprintNeedsUpdate( lib, BOARD_ITEM::COMPARE_FLAGS::DRC ) )
++            continue;
++
++        std::unique_ptr<FOOTPRINT> placed = placeLike( *lib, *fp, aBoard );
++        std::map<PAD*, PAD*>       padPairs;
++
++        if( matchesWithin( *fp, *placed, &padPairs ) )
++        {
++            takeGeometry( *fp, *placed, padPairs );
++            conformed++;
++        }
++
++        // Must not have a parent when destroyed (see FOOTPRINT::FootprintNeedsUpdate())
++        placed->SetParent( nullptr );
++    }
++
++    return conformed;
++}
++} // namespace
++
++
+ int PCBNEW_JOBS_HANDLER::JobImport( JOB* aJob )
+ {
+     JOB_PCB_IMPORT* job = dynamic_cast<JOB_PCB_IMPORT*>( aJob );
+@@ -2924,6 +3546,13 @@ int PCBNEW_JOBS_HANDLER::JobImport( JOB* aJob )
+         mgr.LoadProject( proFn.GetFullPath(), true );
+         PROJECT* project = mgr.GetProject( proFn.GetFullPath() );
+ 
++        if( project && fileType == PCB_IO_MGR::ALTIUM_DESIGNER )
++            registerAltiumBoardLibraries( wxFileName( job->m_inputFile ), proFn.GetPath(), importMessages );
++
++        // The footprint reconciliation needs the project's footprint table, even an empty one
++        if( project )
++            Pgm().GetLibraryManager().Table( LIBRARY_TABLE_TYPE::FOOTPRINT, LIBRARY_TABLE_SCOPE::PROJECT );
++
+         pi->SetReporter( &importMessages );
+         board = pi->LoadBoard( job->m_inputFile, nullptr, nullptr, project );
+ 
+@@ -2940,17 +3569,7 @@ int PCBNEW_JOBS_HANDLER::JobImport( JOB* aJob )
+             // As the interactive import does: put the board's footprints in a project library
+             // (or link them to the project's own footprint libraries, which a schematic import
+             // registered) and point the board at it, so "Update PCB from Schematic" works.
+-            std::vector<std::unique_ptr<FOOTPRINT>> definitions;
+-
+-            try
+-            {
+-                for( FOOTPRINT* fp : pi->GetImportedCachedLibraryFootprints() )
+-                    definitions.emplace_back( fp );
+-            }
+-            catch( const IO_ERROR& )
+-            {
+-                // no cached library: reconcile from the placed footprints only
+-            }
++            std::vector<std::unique_ptr<FOOTPRINT>> definitions = splitFootprintVariants( board, importMessages );
+ 
+             std::vector<wxString> sourceLibs;
+ 
+@@ -2974,6 +3593,12 @@ int PCBNEW_JOBS_HANDLER::JobImport( JOB* aJob )
+                     reconciler.Reconcile( board, std::move( definitions ),
+                                           IMPORT_PROJ_PROPS::MakeCacheNickname( wxFileName( outputPath ).GetName() ),
+                                           sourceLibs );
++
++                    wxString cacheNick = IMPORT_PROJ_PROPS::MakeCacheNickname( wxFileName( outputPath ).GetName() );
++                    wxFileName cachePath( project->GetProjectPath(), wxEmptyString );
++                    cachePath.AppendDir( cacheNick + wxS( "." ) + FILEEXT::KiCadFootprintLibPathExtension );
++                    conformFootprintsToLibrary( board, *adapter, cacheNick, cachePath.GetPath(),
++                                                importMessages );
+                 }
+                 catch( const IO_ERROR& ioe )
+                 {

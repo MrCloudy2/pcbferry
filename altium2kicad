@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Convert an Altium project (.PrjPcb), schematic (.SchDoc) or board (.PcbDoc)
 into a KiCad project folder, using a kicad-cli built with the altium2kicad
-patches (`sch import`, and a `pcb import` that keeps design rules).
+patches (`sch import`, and a `pcb import` that keeps design rules and links
+footprints to libraries).
 
     altium2kicad Board.PrjPcb out/
     altium2kicad --check Board.PrjPcb out/
 
-The output folder gets NAME.kicad_pro, NAME.kicad_sch (+ sub-sheets),
-NAME.kicad_pcb and import-reports/ with kicad-cli's JSON reports plus a
-summary.json. Exit status is non-zero if any step fails.
+The output folder gets NAME.kicad_pro, NAME.kicad_pcb, NAME.kicad_sch
+(+ sub-sheets), the symbol and footprint libraries the imports link to, and
+import-reports/ with kicad-cli's JSON reports plus a summary.json. Exit status
+is non-zero if any step fails.
 """
 
 import argparse
@@ -129,11 +131,34 @@ def check_step(name: str, cmd: list[str], output: Path, summary: dict, parse=Non
     return ok
 
 
+# Violation types that say a symbol or footprint is not properly linked to a
+# library; a clean conversion has none.
+LIBRARY_ISSUES = ("lib_symbol_issues", "lib_symbol_mismatch", "footprint_link_issues",
+                  "lib_footprint_issues", "lib_footprint_mismatch")
+
+
+def by_type(violations: list) -> dict:
+    counts = {}
+    for v in violations:
+        counts[v.get("type", "?")] = counts.get(v.get("type", "?"), 0) + 1
+    return counts
+
+
+def erc_counts(path: Path) -> dict:
+    violations = [v for sheet in read_report(path).get("sheets", [])
+                  for v in sheet.get("violations", [])]
+    types = by_type(violations)
+    return {"violations": len(violations),
+            "library_issues": {t: types[t] for t in LIBRARY_ISSUES if t in types}}
+
+
 def drc_counts(path: Path) -> dict:
     data = read_report(path)
+    types = by_type(data.get("violations", []))
     return {"violations": len(data.get("violations", [])),
             "unconnected_items": len(data.get("unconnected_items", [])),
-            "schematic_parity": len(data.get("schematic_parity", []))}
+            "schematic_parity": len(data.get("schematic_parity", [])),
+            "library_issues": {t: types[t] for t in LIBRARY_ISSUES if t in types}}
 
 
 def main(argv=None) -> int:
@@ -195,12 +220,18 @@ def main(argv=None) -> int:
     kicad_sch = out / f"{name}.kicad_sch"
     kicad_pcb = out / f"{name}.kicad_pcb"
     ok = True
-    # Schematic first: it writes NAME.kicad_pro, which the board import then
-    # loads and adds its design rules and netclasses to.
-    if sch_src:
-        ok &= import_step("sch", sch_src, kicad_sch, reports, summary)
+    # Board first: the schematic import takes each symbol's footprint library
+    # link from the board part with the same reference in NAME.kicad_pcb.
+    # Both write their settings (rules, netclasses, libraries) to NAME.kicad_pro.
     if pcb_src:
         ok &= import_step("pcb", pcb_src, kicad_pcb, reports, summary)
+    if sch_src:
+        ok &= import_step("sch", sch_src, kicad_sch, reports, summary)
+
+    # The second import rewrites the library tables and leaves .bak copies of
+    # tables the first one wrote moments earlier.
+    for bak in out.glob("*-lib-table.bak"):
+        bak.unlink()
 
     if args.check and ok:
         if sch_src:
@@ -208,9 +239,15 @@ def main(argv=None) -> int:
             ok &= check_step("sch export netlist",
                              [KICAD_CLI, "sch", "export", "netlist", "-o", str(net), str(kicad_sch)],
                              net, summary)
+            erc = reports / "erc.json"
+            ok &= check_step("sch erc",
+                             [KICAD_CLI, "sch", "erc", "--format", "json", "--severity-all",
+                              "-o", str(erc), str(kicad_sch)],
+                             erc, summary, erc_counts)
         if pcb_src:
             drc = reports / "drc.json"
-            cmd = [KICAD_CLI, "pcb", "drc", "--format", "json", "-o", str(drc)]
+            cmd = [KICAD_CLI, "pcb", "drc", "--format", "json", "--severity-all",
+                   "-o", str(drc)]
             if sch_src:
                 cmd.append("--schematic-parity")
             ok &= check_step("pcb drc", cmd + [str(kicad_pcb)], drc, summary, drc_counts)
@@ -220,6 +257,19 @@ def main(argv=None) -> int:
 
     warnings = sum(len(s.get("warnings", [])) for s in summary["steps"])
     errors = sum(len(s.get("errors", [])) for s in summary["steps"])
+    if args.check:
+        issues, checked = {}, set()
+        for s in summary["steps"]:
+            if "library_issues" in s:
+                checked.add(s["step"])
+            for t, n in s.get("library_issues", {}).items():
+                issues[t] = issues.get(t, 0) + n
+        expected = ({"sch erc"} if sch_src else set()) | ({"pcb drc"} if pcb_src else set())
+        if checked != expected:
+            log("library links: not checked (a step failed)")
+        else:
+            log("library links: " + (", ".join(f"{n} {t}" for t, n in issues.items())
+                                     or "all clean"))
     status = "done" if ok else "FAILED"
     log(f"{status}: {out} ({warnings} warnings, {errors} errors; see "
         f"{reports.relative_to(out.parent)}/summary.json)")

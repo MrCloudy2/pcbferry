@@ -1,0 +1,553 @@
+diff --git a/eeschema/eeschema_jobs_handler.cpp b/eeschema/eeschema_jobs_handler.cpp
+index 76b7d4ce..c9056e37 100644
+--- a/eeschema/eeschema_jobs_handler.cpp
++++ b/eeschema/eeschema_jobs_handler.cpp
+@@ -89,6 +89,12 @@
+ #include <project_sch.h>
+ 
+ #include <libraries/symbol_library_adapter.h>
++#include <libraries/library_manager.h>
++#include <import_proj_properties.h>
++#include <kiface_ids.h>
++#include <kiway.h>
++#include <sch_footprint_field_reconciler.h>
++#include <wx/fileconf.h>
+ 
+ 
+ EESCHEMA_JOBS_HANDLER::EESCHEMA_JOBS_HANDLER( KIWAY* aKiway ) :
+@@ -1575,6 +1581,260 @@ std::map<std::string, UTF8> altiumProjectProperties( const wxFileName& aProjectF
+ } // namespace
+ 
+ 
++namespace
++{
++/**
++ * Copy the libraries an Altium project lists into the KiCad project and register them in its
++ * symbol and footprint tables, as the interactive project import does: schematic symbols then
++ * link to their library, and footprint fields can be reconciled. Returns the footprint library
++ * nicknames.
++ */
++std::vector<wxString> registerAltiumProjectLibraries( const wxFileName& aPrjPcb, const wxString& aProjectDir,
++                                                      REPORTER& aReporter )
++{
++    wxFileConfig config( wxEmptyString, wxEmptyString, wxEmptyString, aPrjPcb.GetFullPath(),
++                         wxCONFIG_USE_NO_ESCAPE_CHARACTERS );
++
++    std::vector<wxFileName> symLibs, fpLibs;
++    wxString                group;
++    long                    index;
++
++    for( bool more = config.GetFirstGroup( group, index ); more; more = config.GetNextGroup( group, index ) )
++    {
++        if( !group.StartsWith( wxS( "Document" ) ) )
++            continue;
++
++        wxFileName fn( config.Read( group + wxS( "/DocumentPath" ), wxEmptyString ), wxPATH_WIN );
++
++        if( !fn.IsOk() || fn.GetFullName().IsEmpty() )
++            continue;
++
++        if( !fn.IsAbsolute() )
++            fn.MakeAbsolute( aPrjPcb.GetPath() );
++
++        wxString ext = fn.GetExt().Lower();
++
++        if( ext == wxS( "schlib" ) || ext == wxS( "intlib" ) )
++            symLibs.push_back( fn );
++
++        if( ext == wxS( "pcblib" ) || ext == wxS( "intlib" ) )
++            fpLibs.push_back( fn );
++    }
++
++    LIBRARY_MANAGER&      manager = Pgm().GetLibraryManager();
++    std::vector<wxString> fpNicknames;
++
++    auto addRows = [&]( const std::vector<wxFileName>& aLibs, LIBRARY_TABLE_TYPE aType, const wxString& aPluginName,
++                        std::vector<wxString>* aNicknames )
++    {
++        std::optional<LIBRARY_TABLE*> table = manager.Table( aType, LIBRARY_TABLE_SCOPE::PROJECT );
++
++        if( !table || aLibs.empty() )
++            return;
++
++        for( const wxFileName& lib : aLibs )
++        {
++            if( !lib.FileExists() || lib.GetSize() == 0 )
++            {
++                aReporter.Report( wxString::Format( _( "Library '%s' listed in the project was not found or is empty." ),
++                                                    lib.GetFullPath() ),
++                                  RPT_SEVERITY_WARNING );
++                continue;
++            }
++
++            // Copy it into the project so the table stays portable, as the interactive import does
++            wxFileName copy( aProjectDir, lib.GetFullName() );
++
++            if( copy.GetFullPath() != lib.GetFullPath() )
++                wxCopyFile( lib.GetFullPath(), copy.GetFullPath(), true );
++
++            if( !( *table )->HasRow( lib.GetName() ) )
++            {
++                LIBRARY_TABLE_ROW& row = ( *table )->InsertRow();
++                row.SetNickname( lib.GetName() );
++                row.SetURI( wxS( "${KIPRJMOD}/" ) + lib.GetFullName() );
++                row.SetType( aPluginName );
++            }
++
++            if( aNicknames )
++                aNicknames->push_back( lib.GetName() );
++        }
++
++        ( *table )->Save().map_error(
++                [&]( const LIBRARY_ERROR& aError )
++                {
++                    aReporter.Report( _( "Error saving project library table: " ) + aError.message,
++                                      RPT_SEVERITY_ERROR );
++                } );
++    };
++
++    addRows( symLibs, LIBRARY_TABLE_TYPE::SYMBOL, SCH_IO_MGR::ShowType( SCH_IO_MGR::SCH_ALTIUM ), nullptr );
++    // The footprint plugin lives in pcbnew; its registered name is stable.
++    addRows( fpLibs, LIBRARY_TABLE_TYPE::FOOTPRINT, wxS( "Altium Designer" ), &fpNicknames );
++
++    return fpNicknames;
++}
++
++
++/**
++ * Link every imported symbol to a library, as the board import does for footprints: a symbol
++ * found in a registered project library (e.g. a copied SchLib) keeps its link; the others (from
++ * database or server libraries the import cannot read) are written, from the schematic's own
++ * copies, to a "<project>-import-syms" library that is registered in the project and linked.
++ */
++void linkImportedSymbols( SCHEMATIC& aSchematic, PROJECT* aProject, const wxString& aCacheNickname,
++                          REPORTER& aReporter )
++{
++    SYMBOL_LIBRARY_ADAPTER* adapter = PROJECT_SCH::SymbolLibAdapter( aProject );
++    std::set<wxString>      loaded;
++
++    constexpr int sameFlags = SCH_ITEM::COMPARE_FLAGS::EQUALITY | SCH_ITEM::COMPARE_FLAGS::ERC;
++
++    // Linked to its source library only if the library holds the same symbol: a placed part can
++    // differ from its library (edited, or an older library revision), and the design must not
++    // change when the project is opened.
++    auto inLibrary = [&]( const LIB_ID& aId, const LIB_SYMBOL& aPlaced ) -> bool
++    {
++        wxString nick = aId.GetUniStringLibNickname();
++
++        if( !adapter || nick.IsEmpty() || nick == aCacheNickname )
++            return false;
++
++        try
++        {
++            if( loaded.insert( nick ).second )
++                adapter->LoadOne( nick );
++
++            LIB_SYMBOL* libSymbol = adapter->LoadSymbol( nick, aId.GetUniStringLibItemName() );
++
++            return libSymbol && libSymbol->Flatten()->Compare( aPlaced, sameFlags ) == 0;
++        }
++        catch( const std::exception& )
++        {
++            return false;
++        }
++        catch( const IO_ERROR& )
++        {
++            return false;
++        }
++    };
++
++    // Altium parts that share a library name can still differ (database records with their own
++    // graphics), so each distinct definition gets its own name: "<name>", "<name> (2)", ...
++
++    std::map<wxString, std::unique_ptr<LIB_SYMBOL>>  cache;      // name -> definition
++    std::map<wxString, std::vector<wxString>>        namesByKey; // old lib id -> names made for it
++    std::map<SCH_SYMBOL*, wxString>                  newName;    // symbol -> name in the cache
++    SCH_SCREENS                                      screens( aSchematic.Root() );
++
++    for( SCH_SCREEN* screen = screens.GetFirst(); screen; screen = screens.GetNext() )
++    {
++        for( SCH_ITEM* item : screen->Items().OfType( SCH_SYMBOL_T ) )
++        {
++            SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
++            LIB_ID      id = symbol->GetLibId();
++            wxString    key = id.Format().wx_str();
++
++            if( !symbol->GetLibSymbolRef() )
++                continue;
++
++            std::unique_ptr<LIB_SYMBOL> flat = symbol->GetLibSymbolRef()->Flatten();
++
++            if( inLibrary( id, *flat ) )
++                continue;
++            wxString                    name;
++
++            for( const wxString& candidate : namesByKey[key] )
++            {
++                if( cache[candidate]->Compare( *flat, sameFlags ) == 0 )
++                {
++                    name = candidate;
++                    break;
++                }
++            }
++
++            if( name.IsEmpty() )
++            {
++                wxString base = id.GetUniStringLibItemName();
++
++                if( cache.count( base ) )
++                    base = wxString::Format( wxS( "%s (%s)" ), base, id.GetUniStringLibNickname() );
++
++                name = base;
++
++                for( int n = 2; cache.count( name ); ++n )
++                    name = wxString::Format( wxS( "%s (%d)" ), base, n );
++
++                flat->SetName( name );
++                flat->SetLibId( LIB_ID( aCacheNickname, name ) );
++                cache[name] = std::move( flat );
++                namesByKey[key].push_back( name );
++            }
++
++            newName[symbol] = name;
++        }
++    }
++
++    if( cache.empty() )
++        return;
++
++    wxFileName libFn( aProject->GetProjectPath(), aCacheNickname, FILEEXT::KiCadSymbolLibFileExtension );
++
++    try
++    {
++        IO_RELEASER<SCH_IO> io( SCH_IO_MGR::FindPlugin( SCH_IO_MGR::SCH_KICAD ) );
++
++        if( libFn.FileExists() )
++            wxRemoveFile( libFn.GetFullPath() );
++
++        io->CreateLibrary( libFn.GetFullPath() );
++
++        // The library cache takes ownership of what it is given
++        for( const auto& [name, definition] : cache )
++            io->SaveSymbol( libFn.GetFullPath(), new LIB_SYMBOL( *definition ) );
++
++        io->SaveLibrary( libFn.GetFullPath() );
++    }
++    catch( const IO_ERROR& ioe )
++    {
++        aReporter.Report( wxString::Format( _( "Could not write symbol library '%s': %s" ),
++                                            libFn.GetFullPath(), ioe.What() ),
++                          RPT_SEVERITY_WARNING );
++        return;
++    }
++
++    std::optional<LIBRARY_TABLE*> table = Pgm().GetLibraryManager().Table( LIBRARY_TABLE_TYPE::SYMBOL,
++                                                                           LIBRARY_TABLE_SCOPE::PROJECT );
++
++    if( !table )
++        return;
++
++    if( !( *table )->HasRow( aCacheNickname ) )
++    {
++        LIBRARY_TABLE_ROW& row = ( *table )->InsertRow();
++        row.SetNickname( aCacheNickname );
++        row.SetURI( wxS( "${KIPRJMOD}/" ) + libFn.GetFullName() );
++        row.SetType( SCH_IO_MGR::ShowType( SCH_IO_MGR::SCH_KICAD ) );
++    }
++
++    ( *table )->Save().map_error(
++            [&]( const LIBRARY_ERROR& aError )
++            {
++                aReporter.Report( _( "Error saving project library table: " ) + aError.message,
++                                  RPT_SEVERITY_ERROR );
++            } );
++
++    for( auto& [symbol, name] : newName )
++    {
++        // The schematic's own copy stays keyed as before (the key falls back to the library
++        // id, so pin it first); only the library link changes.
++        symbol->SetSchSymbolLibraryName( symbol->GetSchSymbolLibraryName() );
++        symbol->SetLibId( LIB_ID( aCacheNickname, name ) );
++    }
++}
++} // namespace
++
++
+ int EESCHEMA_JOBS_HANDLER::JobSchImport( JOB* aJob )
+ {
+     JOB_SCH_IMPORT* job = dynamic_cast<JOB_SCH_IMPORT*>( aJob );
+@@ -1650,6 +1910,7 @@ int EESCHEMA_JOBS_HANDLER::JobSchImport( JOB* aJob )
+ 
+     std::unique_ptr<SCHEMATIC> schematic = std::make_unique<SCHEMATIC>( project );
+     SCH_SHEET_LIST             sheetList;
++    std::vector<wxString>      sourceFpLibs;
+ 
+     try
+     {
+@@ -1670,6 +1931,10 @@ int EESCHEMA_JOBS_HANDLER::JobSchImport( JOB* aJob )
+                 return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
+             }
+ 
++            // Only after the import: the placed symbols are what the design uses, whatever the
++            // project's libraries hold now.
++            sourceFpLibs = registerAltiumProjectLibraries( inputFn, outputFn.GetPath(), importReporter );
++
+             // Sheets keep their source names, except the first top-level sheet, which becomes
+             // the requested output file so it can be passed straight to other commands.
+             SCH_SHEET* firstSheet = schematic->GetTopLevelSheets().front();
+@@ -1695,6 +1960,76 @@ int EESCHEMA_JOBS_HANDLER::JobSchImport( JOB* aJob )
+             loadedSheet->GetScreen()->SetFileName( outputFn.GetFullPath() );
+         }
+ 
++        // Point footprint fields at the project's footprint libraries, or at the library the
++        // board import fills from the board's own footprints (same nickname), as the
++        // interactive import does, so "Update PCB from Schematic" works.
++        SCH_FOOTPRINT_FIELD_RECONCILER fpReconciler(
++                IMPORT_PROJ_PROPS::MakeCacheNickname( outputFn.GetName() ), sourceFpLibs, &importReporter );
++        fpReconciler.Reconcile( *schematic );
++
++        // A field the reconciler sent to the board's footprint cache links to a project footprint
++        // library instead when exactly one of them holds that footprint, which is how the board
++        // import resolves it too; otherwise schematic and board would name different libraries.
++        if( !sourceFpLibs.empty() )
++        {
++            typedef int ( *TESTER_FN_PTR )( const wxString&, PROJECT* );
++
++            KIFACE*       cvpcb = m_kiway->KiFACE( KIWAY::FACE_CVPCB );
++            TESTER_FN_PTR linkTester =
++                    cvpcb ? (TESTER_FN_PTR) cvpcb->IfaceOrAddress( KIFACE_TEST_FOOTPRINT_LINK ) : nullptr;
++            wxString cacheNick = IMPORT_PROJ_PROPS::MakeCacheNickname( outputFn.GetName() );
++            std::map<wxString, wxString> sourceOf; // footprint name -> library, empty if none or several
++
++            if( linkTester )
++                Pgm().GetLibraryManager().LoadProjectTables( { LIBRARY_TABLE_TYPE::FOOTPRINT } );
++
++            SCH_SCREENS fpScreens( schematic->Root() );
++
++            for( SCH_SCREEN* screen = fpScreens.GetFirst(); linkTester && screen; screen = fpScreens.GetNext() )
++            {
++                for( SCH_ITEM* item : screen->Items().OfType( SCH_SYMBOL_T ) )
++                {
++                    SCH_FIELD* field = static_cast<SCH_SYMBOL*>( item )->GetField( FIELD_T::FOOTPRINT );
++                    LIB_ID     fpId;
++
++                    if( !field || fpId.Parse( field->GetText(), true ) >= 0
++                        || fpId.GetUniStringLibNickname() != cacheNick )
++                    {
++                        continue;
++                    }
++
++                    wxString name = fpId.GetUniStringLibItemName();
++
++                    if( !sourceOf.count( name ) )
++                    {
++                        std::vector<wxString> found;
++
++                        for( const wxString& nick : sourceFpLibs )
++                        {
++                            try
++                            {
++                                if( linkTester( LIB_ID( nick, name ).Format().wx_str(), project ) == 0 )
++                                    found.push_back( nick );
++                            }
++                            catch( ... )
++                            {
++                                // a library that cannot be read holds nothing
++                            }
++                        }
++
++                        sourceOf[name] = found.size() == 1 ? found.front() : wxString();
++                    }
++
++                    if( !sourceOf[name].IsEmpty() )
++                        field->SetText( LIB_ID( sourceOf[name], name ).Format().wx_str() );
++                }
++            }
++        }
++
++        linkImportedSymbols( *schematic, project,
++                             LIB_ID::FixIllegalChars( outputFn.GetName() + wxS( "-import-syms" ), true ).wx_str(),
++                             importReporter );
++
+         // Non-KiCad schematics do not use a KiCad drawing sheet; match the interactive import.
+         DS_DATA_MODEL::GetTheInstance().SetEmptyLayout();
+         BASE_SCREEN::m_DrawingSheetFileName = "empty.kicad_wks";
+diff --git a/pcbnew/footprint_import_reconciler.cpp b/pcbnew/footprint_import_reconciler.cpp
+index 4abdc10f..f8a5187f 100644
+--- a/pcbnew/footprint_import_reconciler.cpp
++++ b/pcbnew/footprint_import_reconciler.cpp
+@@ -101,12 +101,25 @@ FOOTPRINT_IMPORT_RECONCILER::Reconcile( BOARD* aBoard,
+     // index importer defs by FPID item name
+     std::map<wxString, FOOTPRINT*> defByName;
+ 
++    // Prefer a front-side, unrotated instance: saving a library footprint turns it back to the
++    // front at 0 degrees, and a flipped or rotated instance may not survive that unchanged
++    // (mechanical layer pairs, rounding), which then reads as a library mismatch.
++    auto rank = []( const FOOTPRINT* aFp )
++    {
++        return ( aFp->IsFlipped() ? 2 : 0 ) + ( aFp->GetOrientation().IsZero() ? 0 : 1 );
++    };
++
+     for( const std::unique_ptr<FOOTPRINT>& def : aDefinitions )
+     {
+         wxString name = def->GetFPID().GetUniStringLibItemName();
+ 
+-        if( !name.IsEmpty() )
+-            defByName.emplace( name, def.get() );
++        if( name.IsEmpty() )
++            continue;
++
++        auto [it, added] = defByName.emplace( name, def.get() );
++
++        if( !added && rank( def.get() ) < rank( it->second ) )
++            it->second = def.get();
+     }
+ 
+     // preload source libs before membership queries
+diff --git a/pcbnew/pcb_io/altium/pcb_io_altium_designer.cpp b/pcbnew/pcb_io/altium/pcb_io_altium_designer.cpp
+index 1ecc3b03..a95e71bf 100644
+--- a/pcbnew/pcb_io/altium/pcb_io_altium_designer.cpp
++++ b/pcbnew/pcb_io/altium/pcb_io_altium_designer.cpp
+@@ -351,6 +351,26 @@ void PCB_IO_ALTIUM_DESIGNER::loadAltiumLibrary( const wxString& aLibraryPath )
+ }
+ 
+ 
++bool PCB_IO_ALTIUM_DESIGNER::FootprintExists( const wxString& aLibraryPath, const wxString& aFootprintName,
++                                              const std::map<std::string, UTF8>* aProperties )
++{
++    // The base implementation loads the footprint, which throws for a name the library lacks
++    // and leaks the one it finds.
++    wxArrayString names;
++
++    try
++    {
++        FootprintEnumerate( names, aLibraryPath, true, aProperties );
++    }
++    catch( const IO_ERROR& )
++    {
++        return false;
++    }
++
++    return names.Index( aFootprintName ) != wxNOT_FOUND;
++}
++
++
+ void PCB_IO_ALTIUM_DESIGNER::FootprintEnumerate( wxArrayString&  aFootprintNames,
+                                                  const wxString& aLibraryPath, bool aBestEfforts,
+                                                  const std::map<std::string, UTF8>* aProperties )
+diff --git a/pcbnew/pcb_io/altium/pcb_io_altium_designer.h b/pcbnew/pcb_io/altium/pcb_io_altium_designer.h
+index e0a8a11f..27fa3c53 100644
+--- a/pcbnew/pcb_io/altium/pcb_io_altium_designer.h
++++ b/pcbnew/pcb_io/altium/pcb_io_altium_designer.h
+@@ -89,7 +89,8 @@ public:
+ 
+     std::vector<FOOTPRINT*> GetImportedCachedLibraryFootprints() override;
+ 
+-    //bool FootprintExists( const wxString& aLibraryPath, const wxString& aFootprintName, const PROPERTIES* aProperties = nullptr );
++    bool FootprintExists( const wxString& aLibraryPath, const wxString& aFootprintName,
++                          const std::map<std::string, UTF8>* aProperties = nullptr ) override;
+ 
+     bool IsLibraryWritable( const wxString& aLibraryPath ) override { return false; }
+ 
+diff --git a/pcbnew/pcbnew_jobs_handler.cpp b/pcbnew/pcbnew_jobs_handler.cpp
+index 6cb19edb..cacb93fa 100644
+--- a/pcbnew/pcbnew_jobs_handler.cpp
++++ b/pcbnew/pcbnew_jobs_handler.cpp
+@@ -93,6 +93,10 @@
+ #include <3d_rendering/raytracing/render_3d_raytrace_ram.h>
+ #include <3d_rendering/track_ball.h>
+ #include <project_pcb.h>
++#include <footprint_import_reconciler.h>
++#include <import_proj_properties.h>
++#include <libraries/library_manager.h>
++#include <libraries/library_table.h>
+ #include <pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h>
+ #include <reporter.h>
+ #include <progress_reporter.h>
+@@ -2923,14 +2927,6 @@ int PCBNEW_JOBS_HANDLER::JobImport( JOB* aJob )
+         pi->SetReporter( &importMessages );
+         board = pi->LoadBoard( job->m_inputFile, nullptr, nullptr, project );
+ 
+-        for( const auto& [text, severity] : importMessages.m_messages )
+-        {
+-            if( severity == RPT_SEVERITY_ERROR )
+-                errors.push_back( text );
+-            else if( severity == RPT_SEVERITY_WARNING )
+-                warnings.push_back( text );
+-        }
+-
+         if( !board )
+         {
+             m_reporter->Report( _( "Failed to load board\n" ), RPT_SEVERITY_ERROR );
+@@ -2938,8 +2934,71 @@ int PCBNEW_JOBS_HANDLER::JobImport( JOB* aJob )
+         }
+ 
+         if( project )
++        {
+             board->SetProject( project );
+ 
++            // As the interactive import does: put the board's footprints in a project library
++            // (or link them to the project's own footprint libraries, which a schematic import
++            // registered) and point the board at it, so "Update PCB from Schematic" works.
++            std::vector<std::unique_ptr<FOOTPRINT>> definitions;
++
++            try
++            {
++                for( FOOTPRINT* fp : pi->GetImportedCachedLibraryFootprints() )
++                    definitions.emplace_back( fp );
++            }
++            catch( const IO_ERROR& )
++            {
++                // no cached library: reconcile from the placed footprints only
++            }
++
++            std::vector<wxString> sourceLibs;
++
++            if( std::optional<LIBRARY_TABLE*> table =
++                        Pgm().GetLibraryManager().Table( LIBRARY_TABLE_TYPE::FOOTPRINT,
++                                                         LIBRARY_TABLE_SCOPE::PROJECT ) )
++            {
++                for( const LIBRARY_TABLE_ROW& row : ( *table )->Rows() )
++                {
++                    if( row.Type() == PCB_IO_MGR::ShowType( PCB_IO_MGR::ALTIUM_DESIGNER ) )
++                        sourceLibs.push_back( row.Nickname() );
++                }
++            }
++
++            if( FOOTPRINT_LIBRARY_ADAPTER* adapter = PROJECT_PCB::FootprintLibAdapter( project ) )
++            {
++                FOOTPRINT_IMPORT_RECONCILER reconciler( *adapter, project->GetProjectPath(), &importMessages );
++
++                try
++                {
++                    reconciler.Reconcile( board, std::move( definitions ),
++                                          IMPORT_PROJ_PROPS::MakeCacheNickname( wxFileName( outputPath ).GetName() ),
++                                          sourceLibs );
++                }
++                catch( const IO_ERROR& ioe )
++                {
++                    importMessages.Report( wxString::Format( _( "Could not reconcile imported footprint "
++                                                                "libraries: %s" ), ioe.What() ),
++                                           RPT_SEVERITY_WARNING );
++                }
++                catch( const std::exception& e )
++                {
++                    // e.g. a project footprint library that cannot be read
++                    importMessages.Report( wxString::Format( _( "Could not reconcile imported footprint "
++                                                                "libraries: %s" ), e.what() ),
++                                           RPT_SEVERITY_WARNING );
++                }
++            }
++        }
++
++        for( const auto& [text, severity] : importMessages.m_messages )
++        {
++            if( severity == RPT_SEVERITY_ERROR )
++                errors.push_back( text );
++            else if( severity == RPT_SEVERITY_WARNING )
++                warnings.push_back( text );
++        }
++
+         // Save as KiCad format
+         IO_RELEASER<PCB_IO> kicadPlugin( PCB_IO_MGR::FindPlugin( PCB_IO_MGR::KICAD_SEXP ) );
+         kicadPlugin->SaveBoard( outputPath, board );

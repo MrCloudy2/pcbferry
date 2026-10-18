@@ -2,7 +2,8 @@
 #
 #   docker build -t altium2kicad -f Containerfile .      (or podman build)
 #
-# Builds only kicad-cli and the eeschema/pcbnew kifaces. Packages come from a
+# Builds only kicad-cli and the eeschema, pcbnew and cvpcb kifaces (cvpcb:
+# footprint library links of imported schematics). Packages come from a
 # dated Arch Linux Archive snapshot so a rebuild resolves the same versions;
 # pass --build-arg ARCH_SNAPSHOT= to use the live mirrors instead.
 
@@ -55,14 +56,14 @@ RUN cmake -S kicad -B build -G Ninja \
         -DKICAD_UPDATE_CHECK=OFF \
         -DKICAD_USE_SENTRY=OFF \
         -DKICAD_VERSION_EXTRA=altium2kicad \
-    && ninja -C build -j${JOBS} kicad-cli eeschema_kiface pcbnew_kiface api_schema_build_copy
+    && ninja -C build -j${JOBS} kicad-cli eeschema_kiface pcbnew_kiface cvpcb_kiface api_schema_build_copy
 
 # Install by hand: `ninja install` would build every GUI program first.
 # Layout mirrors a normal install (kifaces next to the binary, data under share/kicad).
 RUN set -e; D=/install${PREFIX}; \
     mkdir -p $D/bin $D/lib $D/share/kicad/template $D/share/kicad/schemas; \
     install -m755 build/kicad/kicad-cli build/eeschema/_eeschema.kiface \
-        build/pcbnew/_pcbnew.kiface $D/bin/; \
+        build/pcbnew/_pcbnew.kiface build/cvpcb/_cvpcb.kiface $D/bin/; \
     cp -P build/common/libkicommon.so* build/common/gal/libkigal.so* build/api/libkiapi.so* \
         build/3d-viewer/3d_cache/sg/libkicad_3dsg.so* $D/lib/; \
     cp kicad/resources/project_template/kicad.kicad_pro $D/share/kicad/template/; \

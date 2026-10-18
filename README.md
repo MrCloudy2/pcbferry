@@ -3,8 +3,8 @@
 Convert Altium Designer projects to KiCad 10 from the command line, with an
 Altium importer that is noticeably more faithful than the one in stock KiCad.
 
-This is **KiCad 10.0.7 with the altium-kicad-compat importer patches** (14 so far), built headless (only
-`kicad-cli` and the schematic/board kifaces), plus a small wrapper that turns
+This is **KiCad 10.0.7 with the altium-kicad-compat importer patches** (16 so far), built
+headless (only `kicad-cli` and the schematic/board kifaces), plus a small wrapper that turns
 an Altium `.PrjPcb` into a ready KiCad project folder. It is a stopgap: the
 patches are meant for upstream KiCad, but until (and unless) they are merged
 this lets anyone use them without building KiCad.
@@ -50,16 +50,34 @@ docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work" altium2kicad Board.PrjPcb
 ```
 
 Input can be a `.PrjPcb` (recommended), a single `.SchDoc` or a `.PcbDoc`.
+
+For a project the wrapper imports **the board first, then the schematic**, into
+the same folder under the same project name. The order matters: the schematic
+import takes each symbol's footprint library link from the board part with the
+same reference in `NAME.kicad_pcb`. Both imports write their settings to the
+shared `NAME.kicad_pro`.
+
 The output folder gets:
 
 | File | From |
 |---|---|
-| `NAME.kicad_pro` | schematic and board settings, incl. the imported design rules and netclasses |
-| `NAME.kicad_sch` + one `.kicad_sch` per sheet | `kicad-cli sch import` of the whole project |
+| `NAME.kicad_pro` | board and schematic settings, incl. the imported design rules and netclasses |
 | `NAME.kicad_pcb` | `kicad-cli pcb import --format altium` of the project's (first) PcbDoc |
-| `import-reports/sch-import.json`, `pcb-import.json` | kicad-cli's import reports (warnings, layer mapping, counts) |
+| `NAME.kicad_sch` + one `.kicad_sch` per sheet | `kicad-cli sch import` of the whole project |
+| `NAME-import-fps.pretty/` | footprints placed on the board that no project library holds as placed |
+| `NAME-import-syms.kicad_sym` | symbols with no readable library (DbLib, server parts) or differing from it |
+| copies of the project's SchLib / PcbLib / IntLib | the project's own libraries, converted |
+| `fp-lib-table`, `sym-lib-table` | register all of the above, so every symbol and footprint is linked |
+| `import-reports/pcb-import.json`, `sch-import.json` | kicad-cli's import reports (warnings, layer mapping, counts) |
 | `import-reports/summary.json` | every step, its exit code, errors and warnings |
-| `import-reports/NAME.net`, `drc.json` | with `--check`: netlist and DRC (+ schematic parity) of the result |
+| `import-reports/NAME.net`, `erc.json`, `drc.json` | with `--check`: netlist, ERC and DRC (+ schematic parity) of the result |
+
+A footprint placed on the board in several different forms under one name gets
+one library entry per form: `NAME`, `NAME (2)`, `NAME (3)`, ...
+
+The board import finds the project's footprint libraries through the `.PrjPcb`
+next to the PcbDoc or one folder up. With `altium2kicad-container` and a lone
+`.PcbDoc` as input, set `ALTIUM2KICAD_ROOT` so that folder is mounted too.
 
 Options: `--name` (project name, default the input's), `--board` (which PcbDoc
 when a project has several), `--check`, `--force` (write into a non-empty
@@ -71,14 +89,17 @@ has the patches; point `KICAD_CLI` at it.
 
 ### Reading the reports
 
-- `symbols_without_library` in the summary counts "No library symbol found"
-  messages: one per imported symbol, because no KiCad library holds it. The
-  symbols are embedded in the schematic, so this is expected.
+- With `--check`, `library_issues` in the summary (and the last line of output)
+  counts ERC `lib_symbol_issues`/`footprint_link_issues` and DRC
+  `lib_footprint_issues`/`lib_footprint_mismatch`. ERC and DRC run with
+  `--severity-all`. A clean conversion has none, apart from the limits below.
+- `symbols_without_library` counts "No library symbol found" import messages.
+  The importer emits them while reading, before it links symbols to the
+  libraries it writes, so they are informational; ERC's `lib_symbol_issues` is
+  what tells whether symbols ended up linked.
 - Schematic parity in `drc.json` lists `net_conflict` for nets Altium never
   named. Altium calls them `NetC1_2`, KiCad `Net-(C1-Pad2)`; it is the same
   connection. "Update PCB from Schematic" renames them.
-- `footprint_symbol_mismatch` means the board footprint carries its PcbLib name
-  as a library nickname (`MyLib:C0603`) and the symbol does not (`C0603`).
 
 ## What is better than stock KiCad 10
 
@@ -104,6 +125,8 @@ too.
 | `0012` parameters, component kinds, variants | backslashes eaten; `Footprint`/`Description` parameters clobber KiCad fields; graphical parts in BOM and board; most variants lost | kept, mapped, excluded, applied |
 | `0013` board: arcs, keepouts, datum dimensions, rules | gaps where very shallow arcs were; one rule area per keepout primitive (8,393 on Kasli); datum dimensions dropped; several board rules ignored | arcs as tracks; merged keepouts (Kasli: 38); datum dimensions; rules applied |
 | `0014` `pcb import` saves the project | design rules and netclasses lost (only `.kicad_pcb` saved) | `.kicad_pro` saved with them |
+| `0015` linked libraries | CLI imports leave every symbol and footprint unlinked (Kasli: 1,465 ERC + 788 DRC library errors); DbLib/server parts have no library at all | project SchLib/PcbLib/IntLib copied and registered, `-import-syms` / `-import-fps` libraries for the rest: 0 symbol library errors on all 21 projects |
+| `0016` footprint variants | most placed footprints differ from their library copy (Kasli: 592 of 786) because of Altium's rounding and several footprints under one name | copies grouped within 50 nm, distinct forms named `NAME (2)`...: 1,282 → 10 mismatches over 21 projects |
 
 Each patch has a draft upstream issue with the problem, the fix and the
 measurements (`kicad-patches/ISSUES.md` in the altium-kicad-compat repository,
@@ -120,6 +143,13 @@ which also holds the measuring harness).
   even after refilling zones. Check plane and zone connectivity of multi-layer
   boards in pcbnew.
 - One board per project per run (`--board` picks it).
+- Footprint names containing `/` (e.g. `CAP 0805/2012`) can't be written as
+  library files, so those footprints stay unlinked (85 across the 21 test
+  projects).
+- About 10 footprints across the 21 test projects still differ from their
+  library copy, for KiCad-side reasons: keepout zones on rotated parts, and
+  bottom-side parts with per-layer padstacks that don't survive flip → library →
+  flip unchanged.
 - `kicad-cli version` reports `10.0.7-dirty-altium2kicad`: "dirty" because the
   patches are applied on top of the release tag.
 
@@ -166,7 +196,8 @@ redistributing the image must keep them available as GPL-3.0 §6 requires.
   patches are applied with `git apply`: every `patches/NNNN-*.patch`, in sorted
   order, so a new patch only needs a new number. `SOURCE.txt` in the image lists
   the applied patches with their SHA-256.
-- Only `kicad-cli`, `_eeschema.kiface` and `_pcbnew.kiface` (and their shared
+- Only `kicad-cli`, `_eeschema.kiface`, `_pcbnew.kiface` and `_cvpcb.kiface`
+  (footprint library links of schematics) and their shared
   libraries) are built: no GUI programs, QA tests, wxPython or translations.
   They are installed by hand under `/opt/kicad-altium`, because `ninja install`
   would build everything.
