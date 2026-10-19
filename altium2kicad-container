@@ -18,7 +18,7 @@ engine=${ALTIUM2KICAD_ENGINE:-$(command -v podman >/dev/null && echo podman || e
 opts=() pos=() board=
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --name) opts+=("$1" "$2"); shift ;;
+        --name|--footprint-slash) opts+=("$1" "$2"); shift ;;
         --board) board=$2; shift ;;
         --board=*) board=${1#--board=} ;;
         -*) opts+=("$1") ;;

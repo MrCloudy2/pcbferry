@@ -178,6 +178,9 @@ def main(argv=None) -> int:
                     help="drop pad and via lands on inner layers where nothing connects, as "
                          "Altium planes have none: Gerbers closer to Altium's (footprints then "
                          "differ from the project libraries and go to the import library)")
+    ap.add_argument("--footprint-slash", metavar="CHAR",
+                    help="replace '/' in footprint names with CHAR (e.g. _), so those footprints "
+                         "can be linked to a library; default: keep the names as in Altium")
     ap.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args = ap.parse_args(argv)
 
@@ -221,7 +224,8 @@ def main(argv=None) -> int:
         pcb_src = src
 
     summary = {"tool": f"altium2kicad {__version__}", "input": str(src), "output": str(out),
-               "project": name, "options": {"remove_unused_lands": args.remove_unused_lands},
+               "project": name, "options": {"remove_unused_lands": args.remove_unused_lands,
+                                            "footprint_slash": args.footprint_slash},
                "steps": []}
     kicad_sch = out / f"{name}.kicad_sch"
     kicad_pcb = out / f"{name}.kicad_pcb"
@@ -230,8 +234,10 @@ def main(argv=None) -> int:
     # link from the board part with the same reference in NAME.kicad_pcb.
     # Both write their settings (rules, netclasses, libraries) to NAME.kicad_pro.
     if pcb_src:
-        ok &= import_step("pcb", pcb_src, kicad_pcb, reports, summary,
-                          ["--remove-unused-lands"] if args.remove_unused_lands else [])
+        pcb_args = ["--remove-unused-lands"] if args.remove_unused_lands else []
+        if args.footprint_slash:
+            pcb_args += ["--footprint-slash", args.footprint_slash]
+        ok &= import_step("pcb", pcb_src, kicad_pcb, reports, summary, pcb_args)
     if sch_src:
         ok &= import_step("sch", sch_src, kicad_sch, reports, summary)
 

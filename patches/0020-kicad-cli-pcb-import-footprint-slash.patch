@@ -1,0 +1,132 @@
+diff --git a/common/jobs/job_pcb_import.cpp b/common/jobs/job_pcb_import.cpp
+index e4dde690..0caba22c 100644
+--- a/common/jobs/job_pcb_import.cpp
++++ b/common/jobs/job_pcb_import.cpp
+@@ -51,6 +51,8 @@ JOB_PCB_IMPORT::JOB_PCB_IMPORT() :
+     m_params.emplace_back( new JOB_PARAM<wxString>( "report_file", &m_reportFile, m_reportFile ) );
+     m_params.emplace_back( new JOB_PARAM<bool>( "remove_unused_lands", &m_removeUnusedLands,
+                                                 m_removeUnusedLands ) );
++    m_params.emplace_back( new JOB_PARAM<wxString>( "footprint_slash", &m_footprintSlash,
++                                                    m_footprintSlash ) );
+ }
+ 
+ 
+diff --git a/common/jobs/job_pcb_import.h b/common/jobs/job_pcb_import.h
+index 10fafeb6..21cc7602 100644
+--- a/common/jobs/job_pcb_import.h
++++ b/common/jobs/job_pcb_import.h
+@@ -64,6 +64,10 @@ public:
+     /// Drop pad and via lands on inner layers where nothing connects (Altium draws no lands on
+     /// planes): Gerbers closer to Altium's, at the cost of lands Altium keeps on signal layers.
+     bool          m_removeUnusedLands = false;
++
++    /// Replaces '/' in footprint names (a library file name can't hold it, so such footprints
++    /// can't be linked to a library). Empty: names stay as they are.
++    wxString      m_footprintSlash;
+ };
+ 
+ #endif
+diff --git a/eeschema/eeschema_jobs_handler.cpp b/eeschema/eeschema_jobs_handler.cpp
+index 47c2b1e3..94e8fdbf 100644
+--- a/eeschema/eeschema_jobs_handler.cpp
++++ b/eeschema/eeschema_jobs_handler.cpp
+@@ -2116,10 +2116,20 @@ int EESCHEMA_JOBS_HANDLER::JobSchImport( JOB* aJob )
+                     theirs.Parse( it->second, true );
+ 
+                     wxString theirName = theirs.GetUniStringLibItemName();
++                    wxString myName = mine.GetUniStringLibItemName();
+                     wxRegEx  variant( wxS( " \\([0-9]+\\)$" ) );
++
++                    // Both sides: a footprint can be named "RESC2012M (0805)" in its own right
+                     variant.ReplaceFirst( &theirName, wxEmptyString );
++                    variant.ReplaceFirst( &myName, wxEmptyString );
++
++                    // The board import may have replaced '/' in footprint names
++                    bool same = theirName.length() == myName.length();
++
++                    for( size_t i = 0; same && i < myName.length(); ++i )
++                        same = theirName[i] == myName[i] || myName[i] == '/';
+ 
+-                    if( theirName == mine.GetUniStringLibItemName() )
++                    if( same )
+                         symbol->GetField( FIELD_T::FOOTPRINT )->SetText( it->second );
+                 }
+             }
+diff --git a/kicad/cli/command_pcb_import.cpp b/kicad/cli/command_pcb_import.cpp
+index e9199560..0b781d12 100644
+--- a/kicad/cli/command_pcb_import.cpp
++++ b/kicad/cli/command_pcb_import.cpp
+@@ -31,6 +31,7 @@
+ #define ARG_REPORT_FORMAT "--report-format"
+ #define ARG_REPORT_FILE "--report-file"
+ #define ARG_REMOVE_UNUSED_LANDS "--remove-unused-lands"
++#define ARG_FOOTPRINT_SLASH "--footprint-slash"
+ 
+ 
+ CLI::PCB_IMPORT_COMMAND::PCB_IMPORT_COMMAND() : COMMAND( "import" )
+@@ -61,6 +62,12 @@ CLI::PCB_IMPORT_COMMAND::PCB_IMPORT_COMMAND() : COMMAND( "import" )
+                                   "connects, as Altium planes have none (Gerbers closer to "
+                                   "Altium's; footprints then differ from the source libraries)" ) ) )
+             .flag();
++
++    m_argParser.add_argument( ARG_FOOTPRINT_SLASH )
++            .default_value( std::string( "" ) )
++            .help( UTF8STDSTR( _( "Replace '/' in footprint names with this character, so those "
++                                  "footprints can be linked to a library (default: keep '/')" ) ) )
++            .metavar( "CHAR" );
+ }
+ 
+ 
+@@ -134,6 +141,15 @@ int CLI::PCB_IMPORT_COMMAND::doPerform( KIWAY& aKiway )
+     wxString reportFile = From_UTF8( m_argParser.get<std::string>( ARG_REPORT_FILE ).c_str() );
+     importJob->m_reportFile = reportFile;
+     importJob->m_removeUnusedLands = m_argParser.get<bool>( ARG_REMOVE_UNUSED_LANDS );
++    importJob->m_footprintSlash =
++            From_UTF8( m_argParser.get<std::string>( ARG_FOOTPRINT_SLASH ).c_str() );
++
++    if( importJob->m_footprintSlash.length() > 1
++        || importJob->m_footprintSlash.find_first_of( wxS( "/\\:*?\"<>|" ) ) != wxString::npos )
++    {
++        wxFprintf( stderr, _( "Invalid --footprint-slash: one character a file name can hold\n" ) );
++        return EXIT_CODES::ERR_ARGS;
++    }
+ 
+     int exitCode = aKiway.ProcessJob( KIWAY::FACE_PCB, importJob.get() );
+ 
+diff --git a/pcbnew/pcbnew_jobs_handler.cpp b/pcbnew/pcbnew_jobs_handler.cpp
+index b7865f91..64796599 100644
+--- a/pcbnew/pcbnew_jobs_handler.cpp
++++ b/pcbnew/pcbnew_jobs_handler.cpp
+@@ -3562,6 +3562,32 @@ int PCBNEW_JOBS_HANDLER::JobImport( JOB* aJob )
+             return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
+         }
+ 
++        if( !job->m_footprintSlash.IsEmpty() )
++        {
++            int renamed = 0;
++
++            for( FOOTPRINT* fp : board->Footprints() )
++            {
++                LIB_ID   fpid = fp->GetFPID();
++                wxString name = fpid.GetUniStringLibItemName();
++
++                if( name.Replace( wxS( "/" ), job->m_footprintSlash ) )
++                {
++                    fpid.SetLibItemName( name );
++                    fp->SetFPID( fpid );
++                    ++renamed;
++                }
++            }
++
++            if( renamed )
++            {
++                importMessages.Report( wxString::Format( _( "'/' replaced by '%s' in the footprint "
++                                                            "names of %d footprints." ),
++                                                         job->m_footprintSlash, renamed ),
++                                       RPT_SEVERITY_INFO );
++            }
++        }
++
+         // Before the footprints go to libraries, so the library copies carry it too.
+         if( job->m_removeUnusedLands )
+         {

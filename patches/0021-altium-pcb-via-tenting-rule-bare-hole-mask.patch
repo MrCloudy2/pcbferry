@@ -1,0 +1,57 @@
+diff --git a/pcbnew/pcb_io/altium/altium_pcb.cpp b/pcbnew/pcb_io/altium/altium_pcb.cpp
+index 8570dd49..4d070fbe 100644
+--- a/pcbnew/pcb_io/altium/altium_pcb.cpp
++++ b/pcbnew/pcb_io/altium/altium_pcb.cpp
+@@ -4432,7 +4432,12 @@ void ALTIUM_PCB::ConvertPads6ToFootprintItemOnCopper( FOOTPRINT* aFootprint, con
+         VECTOR2I size = pad->GetSize( PADSTACK::ALL_LAYERS );
+ 
+         if( ( size.x <= 0 || size.y <= 0 ) && pad->GetDrillSize().x > 0 )
++        {
+             pad->SetSize( PADSTACK::ALL_LAYERS, pad->GetDrillSize() );
++
++            // Nor does Altium open the mask or paste for it
++            pad->SetLayerSet( pad->GetLayerSet() & LSET::AllCuMask() );
++        }
+     }
+ 
+     aFootprint->Add( pad.release(), ADD_MODE::APPEND );
+@@ -4704,6 +4709,26 @@ void ALTIUM_PCB::ParseVias6Data( const ALTIUM_PCB_COMPOUND_FILE&     aAltiumPcbF
+ 
+     ALTIUM_BINARY_PARSER reader( aAltiumPcbFile, aEntry );
+ 
++    // Vias without their own mask setting follow the highest-priority solder mask rule that
++    // applies to every via (IsVia) or to everything. A negative expansion that closes the
++    // opening is how Altium designs tent vias by rule; KiCad vias take no mask rules.
++    const ARULE6* viaMaskRule = nullptr;
++
++    if( auto rules = m_rules.find( ALTIUM_RULE_KIND::SOLDER_MASK_EXPANSION ); rules != m_rules.end() )
++    {
++        for( const ARULE6& rule : rules->second )
++        {
++            wxString scope = rule.scope1expr.Strip( wxString::both );
++
++            if( rule.enabled && IsAltiumScopeAll( rule.scope2expr )
++                && ( IsAltiumScopeAll( scope ) || scope.IsSameAs( wxS( "IsVia" ), false ) ) )
++            {
++                viaMaskRule = &rule;
++                break;
++            }
++        }
++    }
++
+     while( reader.GetRemainingBytes() >= 4 /* TODO: use Header section of file */ )
+     {
+         checkpoint();
+@@ -4833,6 +4858,12 @@ void ALTIUM_PCB::ParseVias6Data( const ALTIUM_PCB_COMPOUND_FILE&     aAltiumPcbF
+                                                  elem.soldermask_expansion_back,
+                                                  via->GetWidth( B_Cu ) );
+ 
++        if( !elem.soldermask_expansion_manual && viaMaskRule
++            && static_cast<int64_t>( elem.diameter ) + 2LL * viaMaskRule->soldermaskExpansion <= 0 )
++        {
++            tentTop = tentBottom = true;
++        }
++
+         via->SetFrontTentingMode( tentTop ? TENTING_MODE::TENTED : TENTING_MODE::NOT_TENTED );
+         via->SetBackTentingMode( tentBottom ? TENTING_MODE::TENTED : TENTING_MODE::NOT_TENTED );
+ 

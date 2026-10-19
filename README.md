@@ -3,7 +3,7 @@
 Convert Altium Designer projects to KiCad 10 from the command line, with an
 Altium importer that is noticeably more faithful than the one in stock KiCad.
 
-This is **KiCad 10.0.7 with the altium-kicad-compat importer patches** (19 so far), built
+This is **KiCad 10.0.7 with the altium-kicad-compat importer patches** (21 so far), built
 headless (only `kicad-cli` and the schematic/board kifaces), plus a small wrapper that turns
 an Altium `.PrjPcb` into a ready KiCad project folder. The patches are not being
 submitted to KiCad for now, so this is the way to use them without building
@@ -81,7 +81,8 @@ next to the PcbDoc or one folder up. With `altium2kicad-container` and a lone
 
 Options: `--name` (project name, default the input's), `--board` (which PcbDoc
 when a project has several), `--check`, `--force` (write into a non-empty
-folder), `--remove-unused-lands` (see "Fabrication output" below). The exit status is non-zero if an import or check fails to run; DRC
+folder), `--remove-unused-lands` (see "Fabrication output" below),
+`--footprint-slash CHAR` (see the limitations). The exit status is non-zero if an import or check fails to run; DRC
 violations alone do not fail it.
 
 The wrapper is a standalone Python 3 script. It works with any kicad-cli that
@@ -130,6 +131,8 @@ too.
 | `0017` fabrication output | inner layers of per-layer padstacks get zero-height pads (nothing plotted); inverted TrueType text imported as plain text; Board/Board Shape/V-Cut mechanical layers drawn on Edge.Cuts (milled) | inner pads plotted; knock-out text; those layers on their own user layer |
 | `0018` removed via lands, key legends | lands Altium removed ("Remove Unused Pad Shapes") kept on every inner layer; a Comment of just `\` (a key legend) emptied | vias drop unconnected lands as in Altium; `\` kept |
 | `0019` `pcb import --remove-unused-lands` | – | opt-in, see "Fabrication output" |
+| `0020` `pcb import --footprint-slash` | footprints named with `/` can't be linked to a library | opt-in rename; the schematic import follows the board's names (also footprints named like `RESC2012M (0805)`) |
+| `0021` mask: vias tented by rule, bare holes | vias tented by an Altium solder-mask rule (`IsVia`, negative expansion) come out open (US-Plus: 1,150 mm² of extra mask openings); bare holes (zero-size pads) get mask openings Altium doesn't draw | tented; no opening |
 
 Each patch has a draft upstream issue with the problem, the fix and the
 measurements (`kicad-patches/ISSUES.md` in the altium-kicad-compat repository,
@@ -174,9 +177,11 @@ signal-layer copper match exactly or within a few mm². Differences that remain:
   even after refilling zones. Check plane and zone connectivity of multi-layer
   boards in pcbnew.
 - One board per project per run (`--board` picks it).
-- Footprint names containing `/` (e.g. `CAP 0805/2012`) can't be written as
-  library files, so those footprints stay unlinked (85 across the 21 test
-  projects).
+- Footprint names containing `/` (e.g. `CAP 0805/2012`) can't be library file
+  names, so by default those footprints stay unlinked (85 across the 21 test
+  projects). `--footprint-slash _` renames them (`CAP 0805_2012`) on the board,
+  in the libraries and in the schematic's footprint fields, and they link: 0
+  library issues on the four test projects that have them.
 - 6 footprints across the 21 test projects still differ from their library
   copy: keepout zones on rotated parts (KiCad side).
 - `kicad-cli version` reports `10.0.7-dirty-altium2kicad`: "dirty" because the
