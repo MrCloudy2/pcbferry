@@ -1,4 +1,4 @@
-# Builds the altium2kicad image; on a v* tag also pushes it to GHCR and
+# Builds the pcbferry image; on a v* tag also pushes it to GHCR and
 # attaches the corresponding source (patched KiCad tree + patches) to a release.
 name: image
 
@@ -14,7 +14,7 @@ permissions:
   packages: write   # ghcr.io push on tags
 
 env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/altium2kicad
+  IMAGE: ghcr.io/${{ github.repository_owner }}/pcbferry
 
 jobs:
   build:
@@ -36,20 +36,20 @@ jobs:
           context: .
           file: Containerfile
           load: true
-          tags: altium2kicad:ci
+          tags: pcbferry:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Smoke test
         run: |
-          docker run --rm --entrypoint kicad-cli altium2kicad:ci version
-          docker run --rm --entrypoint kicad-cli altium2kicad:ci sch import --help
-          docker run --rm altium2kicad:ci --version
+          docker run --rm --entrypoint kicad-cli pcbferry:ci version
+          docker run --rm --entrypoint kicad-cli pcbferry:ci sch import --help
+          docker run --rm pcbferry:ci --version
 
       - name: Extract corresponding source
         run: |
-          id=$(docker create altium2kicad:ci)
-          docker cp "$id:/opt/kicad-altium/share/doc/altium2kicad" source
+          id=$(docker create pcbferry:ci)
+          docker cp "$id:/opt/kicad-altium/share/doc/pcbferry" source
           docker rm "$id"
           ls -l source
 
@@ -58,7 +58,7 @@ jobs:
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           for tag in "${GITHUB_REF_NAME}" latest; do
-            docker tag altium2kicad:ci "$IMAGE:$tag"
+            docker tag pcbferry:ci "$IMAGE:$tag"
             docker push "$IMAGE:$tag"
           done
 
@@ -67,6 +67,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          tar -C source -czf altium2kicad-patches.tar.gz patches SOURCE.txt
+          tar -C source -czf pcbferry-patches.tar.gz patches SOURCE.txt
           gh release create "$GITHUB_REF_NAME" --generate-notes \
-            source/kicad-*-altium2kicad-source.tar.xz altium2kicad-patches.tar.gz
+            source/kicad-*-pcbferry-source.tar.xz pcbferry-patches.tar.gz

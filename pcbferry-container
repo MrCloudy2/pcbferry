@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# Run altium2kicad from the container image, mapping host paths in and out.
+# Run pcbferry from the container image, mapping host paths in and out.
 #
-#   altium2kicad-container [options] INPUT OUTPUT_DIR
+#   pcbferry-container [options] INPUT OUTPUT_DIR
 #
 # INPUT's folder is mounted read-only. A .PrjPcb that lists documents outside
-# its own folder (../Libraries/...) needs ALTIUM2KICAD_ROOT set to a folder
+# its own folder (../Libraries/...) needs PCBFERRY_ROOT set to a folder
 # containing all of them. Options are passed through; --board's path must also
 # be under that folder.
 #
-# Environment: ALTIUM2KICAD_IMAGE (default localhost/altium2kicad:latest),
-#              ALTIUM2KICAD_ENGINE (podman or docker; default: whichever exists).
+# Environment: PCBFERRY_IMAGE (default localhost/pcbferry:latest),
+#              PCBFERRY_ENGINE (podman or docker; default: whichever exists).
 set -euo pipefail
 
-image=${ALTIUM2KICAD_IMAGE:-localhost/altium2kicad:latest}
-engine=${ALTIUM2KICAD_ENGINE:-$(command -v podman >/dev/null && echo podman || echo docker)}
+image=${PCBFERRY_IMAGE:-localhost/pcbferry:latest}
+engine=${PCBFERRY_ENGINE:-$(command -v podman >/dev/null && echo podman || echo docker)}
 
 opts=() pos=() board=
 while [[ $# -gt 0 ]]; do
@@ -32,12 +32,12 @@ fi
 
 input=$(realpath -- "${pos[0]}")
 output=$(realpath -m -- "${pos[1]}")
-root=$(realpath -- "${ALTIUM2KICAD_ROOT:-$(dirname -- "$input")}")
-case $input in "$root"/*) ;; *) echo "altium2kicad: $input is not under $root" >&2; exit 2 ;; esac
+root=$(realpath -- "${PCBFERRY_ROOT:-$(dirname -- "$input")}")
+case $input in "$root"/*) ;; *) echo "pcbferry: $input is not under $root" >&2; exit 2 ;; esac
 mkdir -p -- "$output"
 if [[ -n $board ]]; then
     board=$(realpath -- "$board")
-    case $board in "$root"/*) ;; *) echo "altium2kicad: $board is not under $root" >&2; exit 2 ;; esac
+    case $board in "$root"/*) ;; *) echo "pcbferry: $board is not under $root" >&2; exit 2 ;; esac
     opts+=(--board "/in/${board#"$root"/}")
 fi
 

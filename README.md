@@ -1,7 +1,12 @@
-# altium2kicad
+# pcbferry
 
-Convert Altium Designer projects to KiCad 10 from the command line, with an
-Altium importer that is noticeably more faithful than the one in stock KiCad.
+**Altium Designer → KiCad 10 converter.** Converts a whole Altium project
+(schematics, board, libraries, design rules) into a KiCad project from the
+command line, with an Altium importer that is noticeably more faithful than the
+one in stock KiCad.
+
+Not related to the archived [altium2kicad](https://github.com/thesourcerer8/altium2kicad)
+Perl scripts; pcbferry builds on KiCad's own Altium importer.
 
 This is **KiCad 10.0.7 with the altium-kicad-compat importer patches** (21 so far), built
 headless (only `kicad-cli` and the schematic/board kifaces), plus a small wrapper that turns
@@ -24,29 +29,29 @@ RAM; the image is ~1.3 GB compressed, ~4 GB on disk):
 It syncs `patches/` with `../altium-kicad-compat/kicad-patches` (every
 `NNNN-*.patch`: new ones added, changed ones replaced, removed ones deleted),
 builds the image with podman or docker, smoke-tests it, and tags it
-`altium2kicad:latest` and `altium2kicad:patches-<hash of the patch set>`. Then
+`pcbferry:latest` and `pcbferry:patches-<hash of the patch set>`. Then
 commit `patches/`. Options: `--no-sync` builds from the committed `patches/`
 (as CI does), `--patches DIR` syncs from another folder, `JOBS=8 ./build.sh`
 compiles with more cores. Any change to the patches recompiles KiCad from
 scratch.
 
-Without the script: `podman build -t altium2kicad -f Containerfile .`
+Without the script: `podman build -t pcbferry -f Containerfile .`
 (or `docker build`).
 
 Convert a project:
 
 ```bash
-./altium2kicad-container --check path/to/Board.PrjPcb out/Board
+./pcbferry-container --check path/to/Board.PrjPcb out/Board
 ```
 
-`altium2kicad-container` mounts the project's folder read-only and the output
+`pcbferry-container` mounts the project's folder read-only and the output
 folder read-write, and runs as your user so the files are yours. If the
 `.PrjPcb` lists documents outside its own folder (`..\Libraries\...`), set
-`ALTIUM2KICAD_ROOT` to a folder containing all of them. Or run the image
+`PCBFERRY_ROOT` to a folder containing all of them. Or run the image
 directly (bash syntax):
 
 ```bash
-docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work" altium2kicad Board.PrjPcb out
+docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work" pcbferry Board.PrjPcb out
 ```
 
 Input can be a `.PrjPcb` (recommended), a single `.SchDoc` or a `.PcbDoc`.
@@ -76,8 +81,8 @@ A footprint placed on the board in several different forms under one name gets
 one library entry per form: `NAME`, `NAME (2)`, `NAME (3)`, ...
 
 The board import finds the project's footprint libraries through the `.PrjPcb`
-next to the PcbDoc or one folder up. With `altium2kicad-container` and a lone
-`.PcbDoc` as input, set `ALTIUM2KICAD_ROOT` so that folder is mounted too.
+next to the PcbDoc or one folder up. With `pcbferry-container` and a lone
+`.PcbDoc` as input, set `PCBFERRY_ROOT` so that folder is mounted too.
 
 Options: `--name` (project name, default the input's), `--board` (which PcbDoc
 when a project has several), `--check`, `--force` (write into a non-empty
@@ -184,7 +189,7 @@ signal-layer copper match exactly or within a few mm². Differences that remain:
   library issues on the four test projects that have them.
 - 6 footprints across the 21 test projects still differ from their library
   copy: keepout zones on rotated parts (KiCad side).
-- `kicad-cli version` reports `10.0.7-dirty-altium2kicad`: "dirty" because the
+- `kicad-cli version` reports `10.0.7-dirty-pcbferry`: "dirty" because the
   patches are applied on top of the release tag.
 
 ## Relation to upstream KiCad
@@ -202,20 +207,20 @@ KiCad is GPL-3.0-or-later. The patches and the wrapper scripts here are
 distributed under the same terms (see `LICENSE`).
 
 The image carries its corresponding source in
-`/opt/kicad-altium/share/doc/altium2kicad/`: the patches, the exact patched
-KiCad tree it was built from (`kicad-10.0.7-altium2kicad-source.tar.xz`), the
+`/opt/kicad-altium/share/doc/pcbferry/`: the patches, the exact patched
+KiCad tree it was built from (`kicad-10.0.7-pcbferry-source.tar.xz`), the
 build configuration (`SOURCE.txt`) and KiCad's license files. To get them out:
 
 ```bash
-docker create --name a2k-src altium2kicad
+docker create --name pcbferry-src pcbferry
 ```
 
 ```bash
-docker cp a2k-src:/opt/kicad-altium/share/doc/altium2kicad ./altium2kicad-source
+docker cp pcbferry-src:/opt/kicad-altium/share/doc/pcbferry ./pcbferry-source
 ```
 
 ```bash
-docker rm a2k-src
+docker rm pcbferry-src
 ```
 
 The release workflow also attaches them to every tagged release. Anyone
@@ -238,5 +243,5 @@ redistributing the image must keep them available as GPL-3.0 §6 requires.
 - `ttf-liberation` is installed because Altium boards use Arial for TrueType
   text and Liberation Sans has the same metrics (DRC and plots of such text).
 - `.github/workflows/image.yml` builds and smoke-tests the image on every push.
-  On a `v*` tag it pushes `ghcr.io/<owner>/altium2kicad` and creates a release
+  On a `v*` tag it pushes `ghcr.io/<owner>/pcbferry` and creates a release
   with the source.

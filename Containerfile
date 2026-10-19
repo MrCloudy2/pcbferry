@@ -1,6 +1,6 @@
-# altium2kicad: KiCad 10.0.7 + Altium importer patches, headless.
+# pcbferry: KiCad 10.0.7 + Altium importer patches, headless.
 #
-#   docker build -t altium2kicad -f Containerfile .      (or podman build)
+#   docker build -t pcbferry -f Containerfile .      (or podman build)
 #
 # Builds only kicad-cli and the eeschema, pcbnew and cvpcb kifaces (cvpcb:
 # footprint library links of imported schematics). Packages come from a
@@ -55,7 +55,7 @@ RUN cmake -S kicad -B build -G Ninja \
         -DKICAD_INSTALL_DEMOS=OFF \
         -DKICAD_UPDATE_CHECK=OFF \
         -DKICAD_USE_SENTRY=OFF \
-        -DKICAD_VERSION_EXTRA=altium2kicad \
+        -DKICAD_VERSION_EXTRA=pcbferry \
     && ninja -C build -j${JOBS} kicad-cli eeschema_kiface pcbnew_kiface cvpcb_kiface api_schema_build_copy
 
 # Install by hand: `ninja install` would build every GUI program first.
@@ -70,9 +70,9 @@ RUN set -e; D=/install${PREFIX}; \
     cp kicad/api/schemas/*.json kicad/resources/schemas/*.json $D/share/kicad/schemas/
 
 # Corresponding source (GPL-3.0+): the patched tree exactly as built, plus the patches.
-RUN set -e; S=/install${PREFIX}/share/doc/altium2kicad; mkdir -p $S; \
+RUN set -e; S=/install${PREFIX}/share/doc/pcbferry; mkdir -p $S; \
     cp -r /src/patches $S/; \
-    tar -C /src --exclude=.git -cJf $S/kicad-${KICAD_TAG}-altium2kicad-source.tar.xz kicad; \
+    tar -C /src --exclude=.git -cJf $S/kicad-${KICAD_TAG}-pcbferry-source.tar.xz kicad; \
     { echo "KiCad ${KICAD_TAG} (${KICAD_COMMIT}) from https://gitlab.com/kicad/code/kicad.git"; \
       echo "with these patches applied in this order (sha256):"; cat /src/patches.sha256; \
       echo "Built with:"; \
@@ -93,8 +93,8 @@ RUN pacman -Sy --noconfirm --needed ttf-liberation \
 COPY --from=build /install/ /
 # Hand-installed binaries keep their build-tree RPATH; point the loader at lib/.
 RUN echo ${PREFIX}/lib > /etc/ld.so.conf.d/kicad-altium.conf && ldconfig
-COPY altium2kicad /usr/local/bin/altium2kicad
-COPY LICENSE README.md /usr/share/doc/altium2kicad/
+COPY pcbferry /usr/local/bin/pcbferry
+COPY LICENSE README.md /usr/share/doc/pcbferry/
 
 ENV PATH=${PREFIX}/bin:${PATH} \
     KICAD_CLI=${PREFIX}/bin/kicad-cli \
@@ -107,5 +107,5 @@ RUN ! ldd ${PREFIX}/bin/kicad-cli ${PREFIX}/bin/*.kiface | grep 'not found' \
     && kicad-cli version
 
 WORKDIR /work
-ENTRYPOINT ["/usr/local/bin/altium2kicad"]
+ENTRYPOINT ["/usr/local/bin/pcbferry"]
 CMD ["--help"]

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Convert an Altium project (.PrjPcb), schematic (.SchDoc) or board (.PcbDoc)
-into a KiCad project folder, using a kicad-cli built with the altium2kicad
+into a KiCad project folder, using a kicad-cli built with the pcbferry
 patches (`sch import`, and a `pcb import` that keeps design rules and links
 footprints to libraries).
 
-    altium2kicad Board.PrjPcb out/
-    altium2kicad --check Board.PrjPcb out/
+    pcbferry Board.PrjPcb out/
+    pcbferry --check Board.PrjPcb out/
 
 The output folder gets NAME.kicad_pro, NAME.kicad_pcb, NAME.kicad_sch
 (+ sub-sheets), the symbol and footprint libraries the imports link to, and
@@ -29,7 +29,7 @@ UNLINKED_SYMBOL = "No library symbol found for schematic symbol"
 
 
 def log(msg: str) -> None:
-    print(f"altium2kicad: {msg}", file=sys.stderr)
+    print(f"pcbferry: {msg}", file=sys.stderr)
 
 
 def find_case_insensitive(base: Path, rel: str) -> Path | None:
@@ -164,7 +164,7 @@ def drc_counts(path: Path) -> dict:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
-        prog="altium2kicad",
+        prog="pcbferry",
         description="Convert an Altium .PrjPcb/.SchDoc/.PcbDoc into a KiCad project.")
     ap.add_argument("input", type=Path, help=".PrjPcb, .SchDoc or .PcbDoc")
     ap.add_argument("output", type=Path, help="output folder (created; must be empty unless --force)")
@@ -223,7 +223,7 @@ def main(argv=None) -> int:
     else:
         pcb_src = src
 
-    summary = {"tool": f"altium2kicad {__version__}", "input": str(src), "output": str(out),
+    summary = {"tool": f"pcbferry {__version__}", "input": str(src), "output": str(out),
                "project": name, "options": {"remove_unused_lands": args.remove_unused_lands,
                                             "footprint_slash": args.footprint_slash},
                "steps": []}

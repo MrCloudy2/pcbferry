@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Rebuild the altium2kicad image with the latest importer patches.
+# Rebuild the pcbferry image with the latest importer patches.
 #
 #   ./build.sh                 sync patches from altium-kicad-compat, build, smoke-test
 #   ./build.sh --no-sync       build from the patches/ already in this repo
@@ -9,17 +9,17 @@
 # folder (new ones added, changed ones replaced, removed ones deleted); the
 # image applies all of them in sorted order. Commit patches/ afterwards.
 #
-# Environment: ALTIUM2KICAD_PATCHES (patch folder, default
+# Environment: PCBFERRY_PATCHES (patch folder, default
 #              ../altium-kicad-compat/kicad-patches next to this repo),
-#              ALTIUM2KICAD_IMAGE (default altium2kicad), ALTIUM2KICAD_ENGINE
+#              PCBFERRY_IMAGE (default pcbferry), PCBFERRY_ENGINE
 #              (podman or docker), JOBS (parallel compile jobs, default 4).
 set -euo pipefail
 export LC_ALL=C
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-src=${ALTIUM2KICAD_PATCHES:-$here/../altium-kicad-compat/kicad-patches}
-image=${ALTIUM2KICAD_IMAGE:-altium2kicad}
-engine=${ALTIUM2KICAD_ENGINE:-$(command -v podman >/dev/null && echo podman || echo docker)}
+src=${PCBFERRY_PATCHES:-$here/../altium-kicad-compat/kicad-patches}
+image=${PCBFERRY_IMAGE:-pcbferry}
+engine=${PCBFERRY_ENGINE:-$(command -v podman >/dev/null && echo podman || echo docker)}
 sync=1
 
 while [[ $# -gt 0 ]]; do
@@ -58,7 +58,7 @@ echo "building $image with ${#patches[@]} patches (${patches[0]##*/} .. ${patche
 
 "$engine" build -f "$here/Containerfile" \
     --build-arg "JOBS=${JOBS:-4}" \
-    --label "altium2kicad.patches=$set_id" \
+    --label "pcbferry.patches=$set_id" \
     -t "$image:latest" -t "$image:patches-$set_id" "$here"
 
 echo "smoke test"
