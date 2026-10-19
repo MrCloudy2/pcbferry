@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Rebuild the pcbferry image with the latest importer patches.
 #
-#   ./build.sh                 sync patches from altium-kicad-compat, build, smoke-test
-#   ./build.sh --no-sync       build from the patches/ already in this repo
-#   ./build.sh --patches DIR   sync from another folder
+#   ./build.sh                 build from the patches/ in this repo, smoke-test
+#   ./build.sh --patches DIR   first sync patches/ from DIR (patch development)
+#   ./build.sh --no-sync       never sync, even when PCBFERRY_PATCHES is set
 #
 # Syncing makes patches/ hold exactly the NNNN-*.patch files of the source
 # folder (new ones added, changed ones replaced, removed ones deleted); the
 # image applies all of them in sorted order. Commit patches/ afterwards.
 #
-# Environment: PCBFERRY_PATCHES (patch folder, default
-#              ../altium-kicad-compat/kicad-patches next to this repo),
+# Environment: PCBFERRY_PATCHES (patch folder to sync from; default: the
+#              development folder ../altium-kicad-compat/kicad-patches if it exists),
 #              PCBFERRY_IMAGE (default pcbferry), PCBFERRY_ENGINE
 #              (podman or docker), JOBS (parallel compile jobs, default 4).
 set -euo pipefail
@@ -20,12 +20,14 @@ here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 src=${PCBFERRY_PATCHES:-$here/../altium-kicad-compat/kicad-patches}
 image=${PCBFERRY_IMAGE:-pcbferry}
 engine=${PCBFERRY_ENGINE:-$(command -v podman >/dev/null && echo podman || echo docker)}
-sync=1
+# Sync only when there is a patch folder to sync from; otherwise build what is committed.
+sync=
+[[ -n ${PCBFERRY_PATCHES:-} || -d $src ]] && sync=1
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --no-sync) sync= ;;
-        --patches) src=$2; shift ;;
+        --patches) src=$2; sync=1; shift ;;
         -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "build.sh: unknown argument $1" >&2; exit 2 ;;
     esac

@@ -1,0 +1,136 @@
+# Pull requests and main: fast checks, then build the image and convert real Altium
+# projects with it. On a v* tag also push the image to GHCR and attach the
+# corresponding source (patched KiCad tree + patches) to a release.
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Wrapper scripts
+        run: |
+          python3 -m py_compile pcbferry
+          python3 pcbferry --help > /dev/null
+          shellcheck build.sh pcbferry-container
+
+      - name: Patches apply to the pinned KiCad
+        run: |
+          tag=$(sed -n 's/^ARG KICAD_TAG=//p' Containerfile)
+          commit=$(sed -n 's/^ARG KICAD_COMMIT=//p' Containerfile)
+          git clone -q --depth 1 --branch "$tag" https://gitlab.com/kicad/code/kicad.git kicad
+          test "$(git -C kicad rev-parse HEAD)" = "$commit"
+          export LC_ALL=C
+          for p in patches/[0-9][0-9][0-9][0-9]-*.patch; do
+            echo "applying ${p##*/}"
+            git -C kicad apply --whitespace=nowarn "$PWD/$p"
+          done
+
+  build:
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    permissions:
+      contents: write   # release assets on tags
+      packages: write   # ghcr.io push on tags
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space (KiCad build needs ~10 GB)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile
+          load: true
+          tags: pcbferry:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test
+        run: |
+          docker run --rm --entrypoint kicad-cli pcbferry:ci version
+          docker run --rm --entrypoint kicad-cli pcbferry:ci sch import --help
+          docker run --rm --entrypoint kicad-cli pcbferry:ci pcb import --help | grep -q -- --footprint-slash
+          docker run --rm pcbferry:ci --version
+
+      - name: Convert real Altium projects
+        run: |
+          set -euo pipefail
+          fetch() {  # repo commit folder
+            git init -q "$3"
+            git -C "$3" fetch -q --depth 1 "https://github.com/$1" "$2"
+            git -C "$3" checkout -q FETCH_HEAD
+          }
+          fetch yasir-shahzad/Digispark-ATTINY85 98ad05c3af666577e37e6065dfea6969bdd86c8b corpus/attiny85
+          fetch sinara-hw/Kasli 98ffc2b1b2c60cfbf7acc94f949f92f182a6fc77 corpus/kasli
+          for p in attiny85/hardware/ATTiny85.PrjPcb kasli/Kasli.PrjPCB; do
+            name=$(basename "${p%.*}")
+            echo "::group::$name"
+            PCBFERRY_IMAGE=pcbferry:ci PCBFERRY_ENGINE=docker \
+              ./pcbferry-container --check "corpus/$p" "out/$name"
+            echo "::endgroup::"
+            python3 - "out/$name/import-reports/summary.json" <<'EOF'
+          import json, sys
+          s = json.load(open(sys.argv[1]))
+          assert s["ok"], f"{sys.argv[1]}: a step failed"
+          issues = {t: n for st in s["steps"] for t, n in st.get("library_issues", {}).items() if n}
+          assert not issues, f"{sys.argv[1]}: unlinked symbols or footprints: {issues}"
+          print(sys.argv[1], "ok")
+          EOF
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: conversions
+          path: out/*/import-reports/
+          if-no-files-found: ignore
+
+      - name: Extract corresponding source
+        run: |
+          id=$(docker create pcbferry:ci)
+          docker cp "$id:/opt/kicad-altium/share/doc/pcbferry" source
+          docker rm "$id"
+          ls -l source
+
+      - name: Push to GHCR
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/pcbferry   # image names are lowercase
+          for tag in "${GITHUB_REF_NAME}" latest; do
+            docker tag pcbferry:ci "$IMAGE:$tag"
+            docker push "$IMAGE:$tag"
+          done
+
+      - name: Release with source
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tar -C source -czf pcbferry-patches.tar.gz patches SOURCE.txt
+          gh release create "$GITHUB_REF_NAME" --generate-notes \
+            source/kicad-*-pcbferry-source.tar.xz pcbferry-patches.tar.gz
