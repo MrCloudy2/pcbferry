@@ -1,0 +1,94 @@
+diff --git a/common/io/altium/altium_parser_utils.cpp b/common/io/altium/altium_parser_utils.cpp
+index cd733ddb..3c164f9c 100644
+--- a/common/io/altium/altium_parser_utils.cpp
++++ b/common/io/altium/altium_parser_utils.cpp
+@@ -57,15 +57,13 @@ wxString AltiumPropertyToKiCadString( const wxString& aString )
+ 
+         if( (*it).GetAsChar( &ch ) )
+         {
+-            if( ch == '\\' )
++            if( ch == '\\' && hasPrev )
+             {
+-                if( hasPrev )
+-                {
+-                    tempString += prev;
+-                    hasPrev = false;
+-                }
+-
+-                continue; // Backslash is ignored and not added to the output
++                // Overbar the character before the backslash; the backslash itself is markup.
++                // With nothing before it (a key legend "\") it is a literal character.
++                tempString += prev;
++                hasPrev = false;
++                continue;
+             }
+         }
+ 
+diff --git a/pcbnew/pcb_io/altium/altium_parser_pcb.cpp b/pcbnew/pcb_io/altium/altium_parser_pcb.cpp
+index 1276db38..e40feb2b 100644
+--- a/pcbnew/pcb_io/altium/altium_parser_pcb.cpp
++++ b/pcbnew/pcb_io/altium/altium_parser_pcb.cpp
+@@ -1387,7 +1387,12 @@ AVIA6::AVIA6( ALTIUM_BINARY_PARSER& aReader )
+ 
+     if( subrecord1 >= 246 )
+     {
+-        aReader.Skip( 38 );
++        aReader.Skip( 6 );
++
++        // "Remove Unused Pad Shapes": one byte per Altium layer, top layer first
++        for( bool& removed : is_pad_removed )
++            removed = aReader.Read<uint8_t>() != 0;
++
+         soldermask_expansion_linked = aReader.Read<uint8_t>() & 0x01;
+         soldermask_expansion_back = aReader.ReadKicadUnit();
+ 
+diff --git a/pcbnew/pcb_io/altium/altium_parser_pcb.h b/pcbnew/pcb_io/altium/altium_parser_pcb.h
+index 068cb3a9..6d9e23c5 100644
+--- a/pcbnew/pcb_io/altium/altium_parser_pcb.h
++++ b/pcbnew/pcb_io/altium/altium_parser_pcb.h
+@@ -896,6 +896,9 @@ struct AVIA6
+     // In PAD_MODE::FULL_STACK, layers correspond to the layer number
+     uint32_t diameter_by_layer[32]{ 0 };
+ 
++    // Lands removed by "Remove Unused Pad Shapes", indexed by Altium layer - 1 (top first)
++    bool is_pad_removed[32]{ false };
++
+     explicit AVIA6( ALTIUM_BINARY_PARSER& aReader );
+ };
+ 
+diff --git a/pcbnew/pcb_io/altium/altium_pcb.cpp b/pcbnew/pcb_io/altium/altium_pcb.cpp
+index bf3c8d6e..8570dd49 100644
+--- a/pcbnew/pcb_io/altium/altium_pcb.cpp
++++ b/pcbnew/pcb_io/altium/altium_pcb.cpp
+@@ -4794,6 +4794,31 @@ void ALTIUM_PCB::ParseVias6Data( const ALTIUM_PCB_COMPOUND_FILE&     aAltiumPcbF
+         }
+         }
+ 
++        // Altium removes unused lands per layer; KiCad removes those not connected, which is
++        // what "Remove Unused Pad Shapes" computed.
++        int  spanStart = std::min( static_cast<int>( elem.layer_start ), static_cast<int>( elem.layer_end ) );
++        int  spanEnd = std::max( static_cast<int>( elem.layer_start ), static_cast<int>( elem.layer_end ) );
++        bool innerRemoved = false;
++        bool endRemoved = false;
++
++        for( int altiumLayer = spanStart; altiumLayer <= spanEnd && altiumLayer <= 32; ++altiumLayer )
++        {
++            if( altiumLayer < 1 || !elem.is_pad_removed[altiumLayer - 1] )
++                continue;
++
++            if( altiumLayer == spanStart || altiumLayer == spanEnd )
++                endRemoved = true;
++            else
++                innerRemoved = true;
++        }
++
++        if( innerRemoved || endRemoved )
++        {
++            via->Padstack().SetUnconnectedLayerMode(
++                    endRemoved ? UNCONNECTED_LAYER_MODE::REMOVE_ALL
++                               : UNCONNECTED_LAYER_MODE::REMOVE_EXCEPT_START_AND_END );
++        }
++
+         // Altium can size the solder mask opening from the hole edge instead of the via land.
+         // KiCad vias cannot represent a hole-referenced opening, so when the resulting opening
+         // does not clear the via land the pad copper is covered and the via is effectively tented.

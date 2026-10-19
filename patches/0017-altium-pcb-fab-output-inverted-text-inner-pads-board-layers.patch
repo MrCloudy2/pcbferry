@@ -1,0 +1,44 @@
+diff --git a/pcbnew/pcb_io/altium/altium_parser_pcb.cpp b/pcbnew/pcb_io/altium/altium_parser_pcb.cpp
+index ebaac726..1276db38 100644
+--- a/pcbnew/pcb_io/altium/altium_parser_pcb.cpp
++++ b/pcbnew/pcb_io/altium/altium_parser_pcb.cpp
+@@ -1273,11 +1273,12 @@ APAD6::APAD6( ALTIUM_BINARY_PARSER& aReader )
+     {
+         sizeAndShape = std::make_unique<APAD6_SIZE_AND_SHAPE>();
+ 
++        // Sizes, not coordinates: no Y flip.
+         for( wxSize& size : sizeAndShape->inner_size )
+-            size.x = aReader.ReadKicadUnitX();
++            size.x = aReader.ReadKicadUnit();
+ 
+         for( wxSize& size : sizeAndShape->inner_size )
+-            size.y = aReader.ReadKicadUnitY();
++            size.y = aReader.ReadKicadUnit();
+ 
+         for( ALTIUM_PAD_SHAPE& shape : sizeAndShape->inner_shape )
+             shape = static_cast<ALTIUM_PAD_SHAPE>( aReader.Read<uint8_t>() );
+@@ -1593,7 +1594,7 @@ ATEXT6::ATEXT6( ALTIUM_BINARY_PARSER& aReader, std::map<uint32_t, wxString>& aSt
+     aReader.SkipSubrecord();
+ 
+     // Altium only supports inverting truetype fonts
+-    if( fonttype != ALTIUM_TEXT_TYPE::STROKE )
++    if( fonttype == ALTIUM_TEXT_TYPE::STROKE )
+     {
+         isInverted = false;
+         isInvertedRect = false;
+diff --git a/pcbnew/pcb_io/altium/altium_pcb.cpp b/pcbnew/pcb_io/altium/altium_pcb.cpp
+index 77fd31a3..bf3c8d6e 100644
+--- a/pcbnew/pcb_io/altium/altium_pcb.cpp
++++ b/pcbnew/pcb_io/altium/altium_pcb.cpp
+@@ -1637,9 +1637,8 @@ void ALTIUM_PCB::HelperFillMechanicalLayerAssignments( const std::vector<ABOARD6
+             case ALTIUM_MECHKIND::COMPONENT_CENTER_TOP: target = F_Fab; break;
+             case ALTIUM_MECHKIND::COMPONENT_CENTER_BOT: target = B_Fab; break;
+ 
+-            case ALTIUM_MECHKIND::BOARD: target = Edge_Cuts; break;
+-            case ALTIUM_MECHKIND::BOARD_SHAPE: target = Edge_Cuts; break;
+-            case ALTIUM_MECHKIND::V_CUT: target = Edge_Cuts; break;
++            // BOARD, BOARD_SHAPE and V_CUT layers keep their own user layer: the board outline
++            // and cut-outs already form Edge.Cuts, and anything else there would be milled.
+ 
+             default: break;
+             }

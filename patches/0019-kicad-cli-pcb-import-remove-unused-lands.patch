@@ -1,0 +1,107 @@
+diff --git a/common/jobs/job_pcb_import.cpp b/common/jobs/job_pcb_import.cpp
+index e989118a..e4dde690 100644
+--- a/common/jobs/job_pcb_import.cpp
++++ b/common/jobs/job_pcb_import.cpp
+@@ -49,6 +49,8 @@ JOB_PCB_IMPORT::JOB_PCB_IMPORT() :
+     m_params.emplace_back( new JOB_PARAM<FORMAT>( "format", &m_format, m_format ) );
+     m_params.emplace_back( new JOB_PARAM<REPORT_FORMAT>( "report_format", &m_reportFormat, m_reportFormat ) );
+     m_params.emplace_back( new JOB_PARAM<wxString>( "report_file", &m_reportFile, m_reportFile ) );
++    m_params.emplace_back( new JOB_PARAM<bool>( "remove_unused_lands", &m_removeUnusedLands,
++                                                m_removeUnusedLands ) );
+ }
+ 
+ 
+diff --git a/common/jobs/job_pcb_import.h b/common/jobs/job_pcb_import.h
+index af18bedb..10fafeb6 100644
+--- a/common/jobs/job_pcb_import.h
++++ b/common/jobs/job_pcb_import.h
+@@ -60,6 +60,10 @@ public:
+     FORMAT        m_format = FORMAT::AUTO;
+     REPORT_FORMAT m_reportFormat = REPORT_FORMAT::NONE;
+     wxString      m_reportFile;
++
++    /// Drop pad and via lands on inner layers where nothing connects (Altium draws no lands on
++    /// planes): Gerbers closer to Altium's, at the cost of lands Altium keeps on signal layers.
++    bool          m_removeUnusedLands = false;
+ };
+ 
+ #endif
+diff --git a/kicad/cli/command_pcb_import.cpp b/kicad/cli/command_pcb_import.cpp
+index 79e4e6e6..e9199560 100644
+--- a/kicad/cli/command_pcb_import.cpp
++++ b/kicad/cli/command_pcb_import.cpp
+@@ -30,6 +30,7 @@
+ #define ARG_FORMAT "--format"
+ #define ARG_REPORT_FORMAT "--report-format"
+ #define ARG_REPORT_FILE "--report-file"
++#define ARG_REMOVE_UNUSED_LANDS "--remove-unused-lands"
+ 
+ 
+ CLI::PCB_IMPORT_COMMAND::PCB_IMPORT_COMMAND() : COMMAND( "import" )
+@@ -54,6 +55,12 @@ CLI::PCB_IMPORT_COMMAND::PCB_IMPORT_COMMAND() : COMMAND( "import" )
+             .default_value( std::string( "" ) )
+             .help( UTF8STDSTR( _( "File path for import report (default: stdout)" ) ) )
+             .metavar( "FILE" );
++
++    m_argParser.add_argument( ARG_REMOVE_UNUSED_LANDS )
++            .help( UTF8STDSTR( _( "Remove pad and via lands on inner layers where nothing "
++                                  "connects, as Altium planes have none (Gerbers closer to "
++                                  "Altium's; footprints then differ from the source libraries)" ) ) )
++            .flag();
+ }
+ 
+ 
+@@ -126,6 +133,7 @@ int CLI::PCB_IMPORT_COMMAND::doPerform( KIWAY& aKiway )
+ 
+     wxString reportFile = From_UTF8( m_argParser.get<std::string>( ARG_REPORT_FILE ).c_str() );
+     importJob->m_reportFile = reportFile;
++    importJob->m_removeUnusedLands = m_argParser.get<bool>( ARG_REMOVE_UNUSED_LANDS );
+ 
+     int exitCode = aKiway.ProcessJob( KIWAY::FACE_PCB, importJob.get() );
+ 
+diff --git a/pcbnew/pcbnew_jobs_handler.cpp b/pcbnew/pcbnew_jobs_handler.cpp
+index 317384d1..b7865f91 100644
+--- a/pcbnew/pcbnew_jobs_handler.cpp
++++ b/pcbnew/pcbnew_jobs_handler.cpp
+@@ -3562,6 +3562,41 @@ int PCBNEW_JOBS_HANDLER::JobImport( JOB* aJob )
+             return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
+         }
+ 
++        // Before the footprints go to libraries, so the library copies carry it too.
++        if( job->m_removeUnusedLands )
++        {
++            int changed = 0;
++
++            auto removeUnused = [&]( PADSTACK& aPadstack )
++            {
++                // A via Altium already strips harder (its end layers too) keeps that.
++                if( aPadstack.UnconnectedLayerMode() == UNCONNECTED_LAYER_MODE::KEEP_ALL )
++                {
++                    aPadstack.SetUnconnectedLayerMode( UNCONNECTED_LAYER_MODE::REMOVE_EXCEPT_START_AND_END );
++                    ++changed;
++                }
++            };
++
++            for( FOOTPRINT* fp : board->Footprints() )
++            {
++                for( PAD* pad : fp->Pads() )
++                {
++                    if( pad->GetAttribute() == PAD_ATTRIB::PTH )
++                        removeUnused( pad->Padstack() );
++                }
++            }
++
++            for( PCB_TRACK* track : board->Tracks() )
++            {
++                if( track->Type() == PCB_VIA_T )
++                    removeUnused( static_cast<PCB_VIA*>( track )->Padstack() );
++            }
++
++            importMessages.Report( wxString::Format( _( "Unused inner lands removed on %d pads "
++                                                        "and vias." ), changed ),
++                                   RPT_SEVERITY_INFO );
++        }
++
+         if( project )
+         {
+             board->SetProject( project );

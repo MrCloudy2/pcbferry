@@ -3,11 +3,11 @@
 Convert Altium Designer projects to KiCad 10 from the command line, with an
 Altium importer that is noticeably more faithful than the one in stock KiCad.
 
-This is **KiCad 10.0.7 with the altium-kicad-compat importer patches** (16 so far), built
+This is **KiCad 10.0.7 with the altium-kicad-compat importer patches** (19 so far), built
 headless (only `kicad-cli` and the schematic/board kifaces), plus a small wrapper that turns
-an Altium `.PrjPcb` into a ready KiCad project folder. It is a stopgap: the
-patches are meant for upstream KiCad, but until (and unless) they are merged
-this lets anyone use them without building KiCad.
+an Altium `.PrjPcb` into a ready KiCad project folder. The patches are not being
+submitted to KiCad for now, so this is the way to use them without building
+KiCad.
 
 The output is a plain KiCad 10 project; open it with any KiCad 10.0.x.
 
@@ -81,7 +81,7 @@ next to the PcbDoc or one folder up. With `altium2kicad-container` and a lone
 
 Options: `--name` (project name, default the input's), `--board` (which PcbDoc
 when a project has several), `--check`, `--force` (write into a non-empty
-folder). The exit status is non-zero if an import or check fails to run; DRC
+folder), `--remove-unused-lands` (see "Fabrication output" below). The exit status is non-zero if an import or check fails to run; DRC
 violations alone do not fail it.
 
 The wrapper is a standalone Python 3 script. It works with any kicad-cli that
@@ -126,11 +126,42 @@ too.
 | `0013` board: arcs, keepouts, datum dimensions, rules | gaps where very shallow arcs were; one rule area per keepout primitive (8,393 on Kasli); datum dimensions dropped; several board rules ignored | arcs as tracks; merged keepouts (Kasli: 38); datum dimensions; rules applied |
 | `0014` `pcb import` saves the project | design rules and netclasses lost (only `.kicad_pcb` saved) | `.kicad_pro` saved with them |
 | `0015` linked libraries | CLI imports leave every symbol and footprint unlinked (Kasli: 1,465 ERC + 788 DRC library errors); DbLib/server parts have no library at all | project SchLib/PcbLib/IntLib copied and registered, `-import-syms` / `-import-fps` libraries for the rest: 0 symbol library errors on all 21 projects |
-| `0016` footprint variants | most placed footprints differ from their library copy (Kasli: 592 of 786) because of Altium's rounding and several footprints under one name | copies grouped within 50 nm, distinct forms named `NAME (2)`...: 1,282 → 10 mismatches over 21 projects |
+| `0016` footprint variants | most placed footprints differ from their library copy (Kasli: 592 of 786) because of Altium's rounding and several footprints under one name | copies grouped within 50 nm, distinct forms named `NAME (2)`...: 1,282 → 6 mismatches over 21 projects (with 0017) |
+| `0017` fabrication output | inner layers of per-layer padstacks get zero-height pads (nothing plotted); inverted TrueType text imported as plain text; Board/Board Shape/V-Cut mechanical layers drawn on Edge.Cuts (milled) | inner pads plotted; knock-out text; those layers on their own user layer |
+| `0018` removed via lands, key legends | lands Altium removed ("Remove Unused Pad Shapes") kept on every inner layer; a Comment of just `\` (a key legend) emptied | vias drop unconnected lands as in Altium; `\` kept |
+| `0019` `pcb import --remove-unused-lands` | – | opt-in, see "Fabrication output" |
 
 Each patch has a draft upstream issue with the problem, the fix and the
 measurements (`kicad-patches/ISSUES.md` in the altium-kicad-compat repository,
 which also holds the measuring harness).
+
+## Fabrication output
+
+Checked by plotting each converted board with `kicad-cli` and comparing it, layer by
+layer and hole by hole, with the Gerbers and NC drill files Altium itself writes
+(19 boards): every drilled hole and slot matches, board outlines match, paste and
+signal-layer copper match exactly or within a few mm². Differences that remain:
+
+- **Planes are imported unfilled.** Altium computes planes when it writes output, so
+  the PcbDoc has no plane copper. Fill all zones (B in pcbnew) before plotting, or
+  the inner planes come out empty.
+- **Plane clearances.** Altium draws no pad lands on plane layers and measures the
+  clearance from the drilled hole; KiCad keeps the lands and measures from them.
+  Filled planes differ from Altium's by about 5–10 % of their area; electrically the
+  same board. `--remove-unused-lands` makes the import drop pad and via lands on
+  inner layers where nothing connects: planes come out close to Altium's (FPGA3:
+  ~720 → ~100 mm² differing per plane), but lands Altium keeps on inner *signal*
+  layers go too, and through-hole footprints then differ from the project's own
+  library copies, so they are stored in the `-import-fps` library instead. Default
+  off. It pays off only where planes outweigh inner signal layers (copper differing
+  from Altium's, default → with the option: FPGA3, 6 planes: 4,959 → 1,477 mm²;
+  US-Plus, 2 planes: 1,489 → 867; Kasli, 1 plane and 3 inner signal layers:
+  1,777 → 3,240; boards without planes get worse, e.g. MISKO3 12.6 → 758).
+- Text: KiCad's stroke font is narrower than Altium's, and TrueType text needs the
+  font installed (otherwise a substitute is used).
+- Footprint "board cutout" regions that overlap the board edge are added to
+  Edge.Cuts; Altium's outline output leaves them out.
+- Altium panels built from embedded boards are not supported.
 
 ### Known limitations
 
@@ -146,10 +177,8 @@ which also holds the measuring harness).
 - Footprint names containing `/` (e.g. `CAP 0805/2012`) can't be written as
   library files, so those footprints stay unlinked (85 across the 21 test
   projects).
-- About 10 footprints across the 21 test projects still differ from their
-  library copy, for KiCad-side reasons: keepout zones on rotated parts, and
-  bottom-side parts with per-layer padstacks that don't survive flip → library →
-  flip unchanged.
+- 6 footprints across the 21 test projects still differ from their library
+  copy: keepout zones on rotated parts (KiCad side).
 - `kicad-cli version` reports `10.0.7-dirty-altium2kicad`: "dirty" because the
   patches are applied on top of the release tag.
 
