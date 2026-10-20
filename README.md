@@ -4,7 +4,7 @@
 (schematics, board, libraries, design rules) into a ready-to-open KiCad 10
 project from the command line.
 
-pcbferry is KiCad 10.0.7's own Altium importer with 21 patches that fix what it
+pcbferry is KiCad 10.0.7's own Altium importer with 23 patches that fix what it
 gets wrong, built headless (`kicad-cli` only), plus a small wrapper that turns a
 `.PrjPcb` into a KiCad project folder. The output is a plain KiCad 10 project:
 open it with any KiCad 10.0.x.
@@ -37,8 +37,12 @@ Gerber and NC drill files it writes.
   | Internal planes (after filling zones) | ~10%, see [planes](#fabrication-output) |
   | Silkscreen | ~30%: text drawn with KiCad's fonts |
 
-Design rules: Altium rules with a KiCad equivalent are imported as board
-settings and netclasses.
+- **Design rules:** of 877 enabled Altium rules, 251 become board settings and
+  netclasses, 102 scoped rules (clearances by net or layer, widths, diff pairs,
+  matched lengths, plane clearances by hole size, via tenting, ...) are written
+  as KiCad custom rules (`NAME.kicad_dru`), 38 are no-ops (KiCad's default).
+  Most of the rest have no KiCad counterpart (autorouter settings, testpoint
+  rules, supply nets) or are checks KiCad always runs; `summary.json` lists them.
 
 ## Quick start
 
@@ -92,6 +96,8 @@ Input can be a `.PrjPcb` (recommended), a single `.SchDoc` or a `.PcbDoc`.
 | `--name NAME` | KiCad project name (default: the input's) |
 | `--board FILE` | which PcbDoc, when a project has several (default: the first) |
 | `--force` | write into a non-empty output folder |
+| `--fill-zones` | fill the planes the import leaves unfilled, using the converted rules (see [planes](#fabrication-output)) |
+| `--no-custom-rules` | don't write the scoped Altium rules to `NAME.kicad_dru` |
 | `--footprint-slash CHAR` | replace `/` in footprint names with `CHAR` (e.g. `_`), see [limitations](#limitations) |
 | `--remove-unused-lands` | drop unconnected pad and via lands on inner layers, see [planes](#fabrication-output) |
 
@@ -108,6 +114,7 @@ The output folder gets:
 | File | From |
 |---|---|
 | `NAME.kicad_pro` | board and schematic settings, incl. the imported design rules and netclasses |
+| `NAME.kicad_dru` | the scoped Altium rules as KiCad custom rules |
 | `NAME.kicad_pcb` | `kicad-cli pcb import --format altium` of the project's (first) PcbDoc |
 | `NAME.kicad_sch` + one `.kicad_sch` per sheet | `kicad-cli sch import` of the whole project |
 | `NAME-import-fps.pretty/` | footprints placed on the board that no project library holds as placed |
@@ -138,8 +145,8 @@ one library entry per form: `NAME`, `NAME (2)`, `NAME (3)`, ...
 
 - **Fill zones before plotting.** Altium computes internal planes when it
   writes output, so the PcbDoc holds no plane copper and the imported plane
-  zones are unfilled. Press B in pcbnew (or refill on plot), or the inner planes
-  come out empty.
+  zones are unfilled. Convert with `--fill-zones`, or press B in pcbnew, or the
+  inner planes come out empty.
 - **Plane clearances.** Altium draws no pad lands on plane layers and measures
   plane clearance from the drilled hole; KiCad keeps the lands and measures
   from them. Electrically it is the same board; filled planes differ from
@@ -159,9 +166,9 @@ one library entry per form: `NAME`, `NAME (2)`, `NAME (3)`, ...
 
 ## Limitations
 
-- Altium rules KiCad can only express as custom rules (scoped clearances,
-  matched lengths, routing layers, plane clearances by hole size) are not
-  written to a `.kicad_dru` yet.
+- Altium rules with no KiCad counterpart (rooms, fanout and routing-style
+  settings, component height and clearance, testpoints, ...) are not carried;
+  the `custom rules` step in `summary.json` lists each one and why.
 - Board DRC on an imported board reports many violations: Altium and KiCad
   check different things, with different defaults. Treat the first DRC as a
   to-do list, not a measure of the import.
@@ -203,6 +210,8 @@ order.
 | `0019` `pcb import --remove-unused-lands` | – | opt-in, see "Fabrication output" |
 | `0020` `pcb import --footprint-slash` | footprints named with `/` can't be linked to a library | opt-in rename; the schematic import follows the board's names (also footprints named like `RESC2012M (0805)`) |
 | `0021` mask: vias tented by rule, bare holes | vias tented by an Altium solder-mask rule (`IsVia`, negative expansion) come out open (US-Plus: 1,150 mm² of extra mask openings); bare holes (zero-size pads) get mask openings Altium doesn't draw | tented; no opening |
+| `0022` board: arc ends, stackup, extra layers | arc ends a few nm off the copper they continue are not connected (Kasli: 499 unconnected items after refill, now 50); dielectrics alternate core/prepreg instead of Altium's; layers beyond Mechanical 45 and Route Guide dropped | ends snapped within 10 µm; Altium's core/prepreg; kept on a free user layer |
+| `0023` `pcb import --fill-zones` | – | fills the zones the import leaves unfilled |
 
 ## Relation to KiCad
 

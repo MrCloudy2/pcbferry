@@ -26,7 +26,7 @@ jobs:
 
       - name: Wrapper scripts
         run: |
-          python3 -m py_compile pcbferry
+          python3 -m py_compile pcbferry pcbferry_dru.py
           python3 pcbferry --help > /dev/null
           shellcheck build.sh pcbferry-container
 
@@ -90,12 +90,14 @@ jobs:
             name=$(basename "${p%.*}")
             echo "::group::$name"
             PCBFERRY_IMAGE=pcbferry:ci PCBFERRY_ENGINE=docker \
-              ./pcbferry-container --check "corpus/$p" "out/$name"
+              ./pcbferry-container --check --fill-zones "corpus/$p" "out/$name"
             echo "::endgroup::"
             python3 - "out/$name/import-reports/summary.json" <<'EOF'
           import json, sys
           s = json.load(open(sys.argv[1]))
           assert s["ok"], f"{sys.argv[1]}: a step failed"
+          rules = [st for st in s["steps"] if st["step"] == "custom rules"]
+          assert rules and rules[0]["ok"], f"{sys.argv[1]}: custom rules not written: {rules}"
           issues = {t: n for st in s["steps"] for t, n in st.get("library_issues", {}).items() if n}
           assert not issues, f"{sys.argv[1]}: unlinked symbols or footprints: {issues}"
           print(sys.argv[1], "ok")

@@ -51,6 +51,11 @@ if [[ -n $sync ]]; then
         fi
     done
     shopt -u nullglob
+    # The rule translator lives next to the patches, in the harness
+    dru=$src/../harness/rules_dru.py
+    if [[ -f $dru ]] && ! cmp -s "$dru" "$here/pcbferry_dru.py"; then
+        echo "updated  pcbferry_dru.py"; cp -- "$dru" "$here/pcbferry_dru.py"
+    fi
 fi
 
 patches=("$dest"/[0-9][0-9][0-9][0-9]-*.patch)

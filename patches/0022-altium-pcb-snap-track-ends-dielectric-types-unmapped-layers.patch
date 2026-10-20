@@ -1,0 +1,208 @@
+diff --git a/pcbnew/pcb_io/altium/altium_parser_pcb.cpp b/pcbnew/pcb_io/altium/altium_parser_pcb.cpp
+index e40feb2b..02f86976 100644
+--- a/pcbnew/pcb_io/altium/altium_parser_pcb.cpp
++++ b/pcbnew/pcb_io/altium/altium_parser_pcb.cpp
+@@ -469,6 +469,7 @@ ABOARD6_LAYER_STACKUP::ABOARD6_LAYER_STACKUP( const std::map<wxString, wxString>
+     dielectricconst = ALTIUM_PROPS_UTILS::ReadDouble( aProps, aPrefix + wxT( "DIELCONST" ), 0. );
+     dielectricthick = ALTIUM_PROPS_UTILS::ReadKicadUnit( aProps, aPrefix + wxT( "DIELHEIGHT" ), wxT( "60mil" ) );
+     dielectricmaterial = ALTIUM_PROPS_UTILS::ReadString( aProps, aPrefix + wxT( "DIELMATERIAL" ), wxT( "FR-4" ) );
++    dielectrictype = ALTIUM_PROPS_UTILS::ReadInt( aProps, aPrefix + wxT( "DIELTYPE" ), 0 );
+ 
+     // TODO: In some component libraries MECHENABLED may be FALSE but the layers show up as used.
+     // (we should check if any objects exists on these layers?)
+diff --git a/pcbnew/pcb_io/altium/altium_parser_pcb.h b/pcbnew/pcb_io/altium/altium_parser_pcb.h
+index 6d9e23c5..c3620b61 100644
+--- a/pcbnew/pcb_io/altium/altium_parser_pcb.h
++++ b/pcbnew/pcb_io/altium/altium_parser_pcb.h
+@@ -497,6 +497,7 @@ struct ABOARD6_LAYER_STACKUP
+     double   dielectricconst;
+     int32_t  dielectricthick;
+     wxString dielectricmaterial;
++    int      dielectrictype = 0; // 1 core, 2 prepreg
+     double   dielectriclosstangent = 0.;
+ 
+     bool            mechenabled = false;
+diff --git a/pcbnew/pcb_io/altium/altium_pcb.cpp b/pcbnew/pcb_io/altium/altium_pcb.cpp
+index 4d070fbe..16cd1218 100644
+--- a/pcbnew/pcb_io/altium/altium_pcb.cpp
++++ b/pcbnew/pcb_io/altium/altium_pcb.cpp
+@@ -745,6 +745,8 @@ void ALTIUM_PCB::Parse( const ALTIUM_PCB_COMPOUND_FILE&              altiumPcbFi
+         }
+     }
+ 
++    HelperSnapTrackEnds();
++
+     // Rebuild interactive length-tuning meanders from the SmartUnions definitions now that all
+     // copper that the unions reference has been created and added to the board.
+     HelperCreateTuningPatterns();
+@@ -1306,6 +1308,12 @@ void ALTIUM_PCB::ParseBoard6Data( const ALTIUM_PCB_COMPOUND_FILE&     aAltiumPcb
+                                               wxString( layer.dielectricmaterial ) );
+         ( *it )->SetEpsilonR( layer.dielectricconst, 0 );
+ 
++        // KiCad's default stackup alternates core and prepreg; Altium names each one
++        if( layer.dielectrictype == 1 )
++            ( *it )->SetTypeName( KEY_CORE );
++        else if( layer.dielectrictype == 2 )
++            ( *it )->SetTypeName( KEY_PREPREG );
++
+         if( layer.dielectriclosstangent > 0. )
+             ( *it )->SetLossTangent( layer.dielectriclosstangent, 0 );
+ 
+@@ -1548,6 +1556,34 @@ void ALTIUM_PCB::remapUnsureLayers( std::vector<ABOARD6_LAYER_STACKUP>& aStackup
+     if( inputLayers.size() == 0 )
+         return;
+ 
++    // Layers with no fixed KiCad counterpart (Mechanical 46 and up, Route Guide, ...) keep their
++    // content on a user layer nothing else uses, highest first, instead of being dropped.
++    LSET usedLayers;
++
++    for( const INPUT_LAYER_DESC& desc : inputLayers )
++    {
++        if( desc.AutoMapLayer != UNDEFINED_LAYER )
++            usedLayers.set( desc.AutoMapLayer );
++    }
++
++    for( INPUT_LAYER_DESC& desc : inputLayers )
++    {
++        if( desc.AutoMapLayer != UNDEFINED_LAYER )
++            continue;
++
++        for( int n = MAX_USER_DEFINED_LAYERS; n >= 1; --n )
++        {
++            PCB_LAYER_ID candidate = static_cast<PCB_LAYER_ID>( static_cast<int>( User_1 ) + ( n - 1 ) * 2 );
++
++            if( !usedLayers.test( candidate ) )
++            {
++                desc.AutoMapLayer = candidate;
++                usedLayers.set( candidate );
++                break;
++            }
++        }
++    }
++
+     // Callback:
+     std::map<wxString, PCB_LAYER_ID> reMappedLayers = m_layerMappingHandler( inputLayers );
+ 
+@@ -6041,6 +6077,110 @@ void ALTIUM_PCB::HelperPcpShapeAsBoardKeepoutRegion( const PCB_SHAPE&   aShape,
+ }
+ 
+ 
++void ALTIUM_PCB::HelperSnapTrackEnds()
++{
++    // Altium stores an arc by centre, radius and angles, so its ends land a few nanometres off
++    // the track or arc it continues, and KiCad connects arcs only where ends coincide (Kasli:
++    // hundreds of unconnected meander arcs). Ends that nearly meet on one layer and net are
++    // pulled onto one point: a via centre if there is one, else a straight track's end (exact
++    // in the file), else the earlier arc's end.
++    constexpr int TOL = 10000; // 10 um: well inside any track width, so nothing new connects
++
++    struct ANCHOR
++    {
++        VECTOR2I   pos;
++        int        rank;   // 0 via, 1 track end, 2 arc end
++        size_t     order;
++        PCB_TRACK* track;  // nullptr for a via
++        bool       start;
++    };
++
++    std::map<std::tuple<int, int, int64_t, int64_t>, std::vector<size_t>> grid;
++    std::vector<ANCHOR>                                                 anchors;
++
++    auto cell = []( int v ) { return static_cast<int64_t>( std::floor( v / double( TOL ) ) ); };
++
++    auto add = [&]( const ANCHOR& a, PCB_LAYER_ID aLayer, int aNet )
++    {
++        grid[{ aLayer, aNet, cell( a.pos.x ), cell( a.pos.y ) }].push_back( anchors.size() );
++        anchors.push_back( a );
++    };
++
++    std::vector<std::pair<size_t, std::pair<PCB_LAYER_ID, int>>> ends;
++
++    for( PCB_TRACK* track : m_board->Tracks() )
++    {
++        if( track->Type() == PCB_VIA_T )
++        {
++            for( PCB_LAYER_ID layer : LSET( track->GetLayerSet() & LSET::AllCuMask() ).Seq() )
++                add( { track->GetPosition(), 0, anchors.size(), nullptr, false }, layer, track->GetNetCode() );
++
++            continue;
++        }
++
++        int rank = track->Type() == PCB_ARC_T ? 2 : 1;
++
++        for( bool start : { true, false } )
++        {
++            ends.push_back( { anchors.size(), { track->GetLayer(), track->GetNetCode() } } );
++            add( { start ? track->GetStart() : track->GetEnd(), rank, anchors.size(), track, start },
++                 track->GetLayer(), track->GetNetCode() );
++        }
++    }
++
++    int snapped = 0;
++
++    for( const auto& [idx, key] : ends )
++    {
++        const ANCHOR& me = anchors[idx];
++        const ANCHOR* best = nullptr;
++
++        for( int64_t dx = -1; dx <= 1; ++dx )
++        {
++            for( int64_t dy = -1; dy <= 1; ++dy )
++            {
++                auto it = grid.find( { key.first, key.second, cell( me.pos.x ) + dx, cell( me.pos.y ) + dy } );
++
++                if( it == grid.end() )
++                    continue;
++
++                for( size_t j : it->second )
++                {
++                    const ANCHOR& other = anchors[j];
++
++                    if( other.track == me.track || ( other.pos - me.pos ).EuclideanNorm() > TOL )
++                        continue;
++
++                    // Only towards a better (lower rank, earlier) anchor, so no point moves twice
++                    if( std::tie( other.rank, other.order ) >= std::tie( me.rank, me.order ) )
++                        continue;
++
++                    if( !best || std::tie( other.rank, other.order ) < std::tie( best->rank, best->order ) )
++                        best = &other;
++                }
++            }
++        }
++
++        if( best && best->pos != me.pos )
++        {
++            if( me.start )
++                me.track->SetStart( best->pos );
++            else
++                me.track->SetEnd( best->pos );
++
++            ++snapped;
++        }
++    }
++
++    if( snapped && m_reporter )
++    {
++        m_reporter->Report( wxString::Format( _( "%d track and arc ends moved by less than 10 um "
++                                                 "to meet the copper they continue." ), snapped ),
++                            RPT_SEVERITY_INFO );
++    }
++}
++
++
+ void ALTIUM_PCB::HelperCreateBoardKeepoutRegions()
+ {
+     for( auto& [key, polys] : m_boardKeepouts )
+diff --git a/pcbnew/pcb_io/altium/altium_pcb.h b/pcbnew/pcb_io/altium/altium_pcb.h
+index 4927677d..105948f7 100644
+--- a/pcbnew/pcb_io/altium/altium_pcb.h
++++ b/pcbnew/pcb_io/altium/altium_pcb.h
+@@ -322,6 +322,7 @@ private:
+     /// Turn the board keepout shapes gathered per layer and restriction set into rule areas,
+     /// one per merged outline.
+     void HelperCreateBoardKeepoutRegions();
++    void HelperSnapTrackEnds();
+ 
+     void HelperSetTextboxAlignmentAndPos( const ATEXT6& aElem, PCB_TEXTBOX* aPcbTextbox );
+     void HelperSetTextAlignmentAndPos( const ATEXT6& aElem, EDA_TEXT* aEdaText );
