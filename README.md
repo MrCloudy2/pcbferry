@@ -4,7 +4,7 @@
 (schematics, board, libraries, design rules) into a ready-to-open KiCad 10
 project from the command line.
 
-pcbferry is KiCad 10.0.7's own Altium importer with 23 patches that fix what it
+pcbferry is KiCad 10.0.7's own Altium importer with 24 patches that fix what it
 gets wrong, built headless (`kicad-cli` only), plus a small wrapper that turns a
 `.PrjPcb` into a KiCad project folder. The output is a plain KiCad 10 project:
 open it with any KiCad 10.0.x.
@@ -212,6 +212,7 @@ order.
 | `0021` mask: vias tented by rule, bare holes | vias tented by an Altium solder-mask rule (`IsVia`, negative expansion) come out open (US-Plus: 1,150 mm² of extra mask openings); bare holes (zero-size pads) get mask openings Altium doesn't draw | tented; no opening |
 | `0022` board: arc ends, stackup, extra layers | arc ends a few nm off the copper they continue are not connected (Kasli: 499 unconnected items after refill, now 50); dielectrics alternate core/prepreg instead of Altium's; layers beyond Mechanical 45 and Route Guide dropped | ends snapped within 10 µm; Altium's core/prepreg; kept on a free user layer |
 | `0023` `pcb import --fill-zones` | – | fills the zones the import leaves unfilled |
+| `0024` schematic Parameter Sets and Blankets | rejected ("not currently supported"): net classes and differential-pair directives set in the schematic are lost | directive labels (`ClassName` → Netclass field) and rule areas |
 
 ## Relation to KiCad
 

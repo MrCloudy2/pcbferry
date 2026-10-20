@@ -1,0 +1,221 @@
+diff --git a/eeschema/sch_io/altium/altium_parser_sch.cpp b/eeschema/sch_io/altium/altium_parser_sch.cpp
+index 1319f2cc..b32b45cb 100644
+--- a/eeschema/sch_io/altium/altium_parser_sch.cpp
++++ b/eeschema/sch_io/altium/altium_parser_sch.cpp
+@@ -438,6 +438,35 @@ ASCH_POLYGON::ASCH_POLYGON( const std::map<wxString, wxString>& aProps ) :
+ }
+ 
+ 
++ASCH_PARAMETER_SET::ASCH_PARAMETER_SET( const std::map<wxString, wxString>& aProps ) :
++        ASCH_OWNER_INTERFACE( aProps )
++{
++    wxASSERT( ReadRecord( aProps ) == ALTIUM_SCH_RECORD::PARAMETER_SET );
++
++    location = VECTOR2I( ReadKiCadUnitFrac( aProps, "LOCATION.X" ),
++                         -ReadKiCadUnitFrac( aProps, "LOCATION.Y" ) );
++    orientation = ReadEnum<ASCH_RECORD_ORIENTATION>( aProps, "ORIENTATION", 0, 3,
++                                                     ASCH_RECORD_ORIENTATION::RIGHTWARDS );
++    name = ALTIUM_PROPS_UTILS::ReadString( aProps, "NAME", "" );
++}
++
++
++ASCH_BLANKET::ASCH_BLANKET( const std::map<wxString, wxString>& aProps ) :
++        ASCH_OWNER_INTERFACE( aProps )
++{
++    wxASSERT( ReadRecord( aProps ) == ALTIUM_SCH_RECORD::BLANKET );
++
++    int locationCount = ALTIUM_PROPS_UTILS::ReadInt( aProps, "LOCATIONCOUNT", 0 );
++
++    for( int i = 1; i <= locationCount; i++ )
++    {
++        const wxString si = std::to_string( i );
++        points.emplace_back( ReadKiCadUnitFrac( aProps, "X" + si ),
++                             -ReadKiCadUnitFrac( aProps, "Y" + si ) );
++    }
++}
++
++
+ ASCH_ROUND_RECTANGLE::ASCH_ROUND_RECTANGLE( const std::map<wxString, wxString>& aProps ) :
+         ASCH_OWNER_INTERFACE( aProps ),
+         ASCH_FILL_INTERFACE( aProps ),
+diff --git a/eeschema/sch_io/altium/altium_parser_sch.h b/eeschema/sch_io/altium/altium_parser_sch.h
+index 4eece6b6..2ba5238e 100644
+--- a/eeschema/sch_io/altium/altium_parser_sch.h
++++ b/eeschema/sch_io/altium/altium_parser_sch.h
+@@ -493,6 +493,26 @@ struct ASCH_POLYGON : ASCH_OWNER_INTERFACE, ASCH_FILL_INTERFACE, ASCH_BORDER_INT
+ };
+ 
+ 
++// A Parameter Set: a directive flag on a wire carrying parameters (net class, differential pair)
++struct ASCH_PARAMETER_SET : ASCH_OWNER_INTERFACE
++{
++    VECTOR2I                location;
++    ASCH_RECORD_ORIENTATION orientation;
++    wxString                name;
++
++    explicit ASCH_PARAMETER_SET( const std::map<wxString, wxString>& aProps );
++};
++
++
++// A Blanket: an area whose border carries Parameter Sets that apply to every net inside it
++struct ASCH_BLANKET : ASCH_OWNER_INTERFACE
++{
++    std::vector<VECTOR2I> points;
++
++    explicit ASCH_BLANKET( const std::map<wxString, wxString>& aProps );
++};
++
++
+ struct ASCH_ROUND_RECTANGLE : ASCH_OWNER_INTERFACE, ASCH_FILL_INTERFACE, ASCH_BORDER_INTERFACE
+ {
+     VECTOR2I BottomLeft;
+diff --git a/eeschema/sch_io/altium/sch_io_altium.cpp b/eeschema/sch_io/altium/sch_io_altium.cpp
+index 4e8a43d8..fb178161 100644
+--- a/eeschema/sch_io/altium/sch_io_altium.cpp
++++ b/eeschema/sch_io/altium/sch_io_altium.cpp
+@@ -53,6 +53,7 @@
+ #include <sch_shape.h>
+ #include <sch_no_connect.h>
+ #include <sch_screen.h>
++#include <sch_rule_area.h>
+ #include <sch_label.h>
+ #include <sch_sheet.h>
+ #include <sch_sheet_pin.h>
+@@ -2192,6 +2193,7 @@ void SCH_IO_ALTIUM::ParseFileHeader( const ALTIUM_COMPOUND_FILE& aAltiumSchFile
+ 
+     m_symbols.clear();
+     m_pinsByRecord.clear();
++    m_parameterSets.clear();
+     m_libSymbols.clear();
+ 
+     // Otherwise we cannot save the imported sheet?
+@@ -2314,6 +2316,7 @@ void SCH_IO_ALTIUM::ParseASCIISchematic( const wxString& aFileName )
+ 
+     m_symbols.clear();
+     m_pinsByRecord.clear();
++    m_parameterSets.clear();
+     m_libSymbols.clear();
+ 
+     // Otherwise we cannot save the imported sheet?
+@@ -2469,7 +2472,7 @@ void SCH_IO_ALTIUM::ParseRecord( int index, std::map<wxString, wxString>& proper
+         break;
+ 
+     case ALTIUM_SCH_RECORD::PARAMETER_SET:
+-        m_errorMessages.emplace( _( "Parameter Set not currently supported." ), RPT_SEVERITY_ERROR );
++        ParseParameterSet( index, properties );
+         break;
+ 
+     case ALTIUM_SCH_RECORD::IMPLEMENTATION_LIST:
+@@ -2519,7 +2522,7 @@ void SCH_IO_ALTIUM::ParseRecord( int index, std::map<wxString, wxString>& proper
+         break;
+ 
+     case ALTIUM_SCH_RECORD::BLANKET:
+-        m_errorMessages.emplace( _( "Blanket not currently supported." ), RPT_SEVERITY_ERROR );
++        ParseBlanket( properties );
+         break;
+ 
+     default:
+@@ -5558,6 +5561,60 @@ void SCH_IO_ALTIUM::ParseBusEntry( const std::map<wxString, wxString>& aProperti
+ }
+ 
+ 
++void SCH_IO_ALTIUM::ParseParameterSet( int aIndex, const std::map<wxString, wxString>& aProperties )
++{
++    ASCH_PARAMETER_SET elem( aProperties );
++
++    SCH_SCREEN* screen = getCurrentScreen();
++    wxCHECK( screen, /* void */ );
++
++    SCH_DIRECTIVE_LABEL* label = new SCH_DIRECTIVE_LABEL( elem.location + m_sheetOffset );
++
++    switch( elem.orientation )
++    {
++    case ASCH_RECORD_ORIENTATION::RIGHTWARDS: label->SetSpinStyle( SPIN_STYLE::RIGHT );  break;
++    case ASCH_RECORD_ORIENTATION::UPWARDS:    label->SetSpinStyle( SPIN_STYLE::UP );     break;
++    case ASCH_RECORD_ORIENTATION::LEFTWARDS:  label->SetSpinStyle( SPIN_STYLE::LEFT );   break;
++    case ASCH_RECORD_ORIENTATION::DOWNWARDS:  label->SetSpinStyle( SPIN_STYLE::BOTTOM ); break;
++    }
++
++    // Altium shows the set's name (e.g. DIFFPAIR) by the flag
++    if( !elem.name.IsEmpty() )
++    {
++        SCH_FIELD field( label, FIELD_T::USER, wxT( "Parameter Set" ) );
++        field.SetText( elem.name );
++        field.SetVisible( true );
++        label->AddField( field );
++    }
++
++    label->SetFlags( IS_NEW );
++    screen->Append( label );
++    m_parameterSets[aIndex] = label;
++}
++
++
++void SCH_IO_ALTIUM::ParseBlanket( const std::map<wxString, wxString>& aProperties )
++{
++    ASCH_BLANKET elem( aProperties );
++
++    SCH_SCREEN* screen = getCurrentScreen();
++    wxCHECK( screen, /* void */ );
++
++    if( elem.points.size() < 3 )
++        return;
++
++    // A rule area applies the directive labels on its border to the nets inside, as a Blanket
++    SCH_RULE_AREA* area = new SCH_RULE_AREA();
++
++    for( const VECTOR2I& point : elem.points )
++        area->AddPoint( point + m_sheetOffset );
++
++    area->AddPoint( elem.points.front() + m_sheetOffset );
++    area->SetFlags( IS_NEW );
++    screen->Append( area );
++}
++
++
+ void SCH_IO_ALTIUM::ParseParameter( const std::map<wxString, wxString>& aProperties )
+ {
+     ASCH_PARAMETER elem( aProperties );
+@@ -5583,6 +5640,21 @@ void SCH_IO_ALTIUM::ParseParameter( const std::map<wxString, wxString>& aPropert
+         return;
+     }
+ 
++    // A parameter of a Parameter Set: a field of its directive label. ClassName assigns the net
++    // class, which KiCad reads from the "Netclass" field.
++    if( auto setIt = m_parameterSets.find( elem.ownerindex ); setIt != m_parameterSets.end() )
++    {
++        SCH_DIRECTIVE_LABEL* label = setIt->second;
++        bool                 netclass = elem.name.IsSameAs( wxT( "ClassName" ), false );
++
++        SCH_FIELD field( label, FIELD_T::USER, netclass ? wxString( wxT( "Netclass" ) ) : elem.name );
++        field.SetText( elem.text );
++        field.SetVisible( netclass || !elem.isHidden );
++        label->AddField( field );
++        label->AutoplaceFields( nullptr, AUTOPLACE_AUTO );
++        return;
++    }
++
+     if( elem.ownerindex <= 0 )
+     {
+         // This is some sheet parameter
+diff --git a/eeschema/sch_io/altium/sch_io_altium.h b/eeschema/sch_io/altium/sch_io_altium.h
+index 3115ec20..a96a2aaf 100644
+--- a/eeschema/sch_io/altium/sch_io_altium.h
++++ b/eeschema/sch_io/altium/sch_io_altium.h
+@@ -207,6 +207,8 @@ private:
+     void ParseLibDesignator( const std::map<wxString, wxString>& aProperties, std::vector<LIB_SYMBOL*>& aSymbol  = nullsym, std::vector<int>& aFontSize = nullint );
+     void ParseBusEntry( const std::map<wxString, wxString>& aProperties );
+     void ParseParameter( const std::map<wxString, wxString>& aProperties );
++    void ParseParameterSet( int aIndex, const std::map<wxString, wxString>& aProperties );
++    void ParseBlanket( const std::map<wxString, wxString>& aProperties );
+     void ParseLibParameter( const std::map<wxString, wxString>& aProperties, std::vector<LIB_SYMBOL*>& aSymbol  = nullsym, std::vector<int>& aFontSize = nullint );
+     void ParseImplementationList( int aIndex, const std::map<wxString, wxString>& aProperties );
+     void ParseImplementation( const std::map<wxString, wxString>& aProperties, std::vector<LIB_SYMBOL*>& aSymbol  = nullsym );
+@@ -243,6 +245,7 @@ private:
+     std::unique_ptr<ASCH_SHEET>        m_altiumSheet;
+     std::map<int, SCH_SYMBOL*>         m_symbols;
+     std::map<int, SCH_PIN*>            m_pinsByRecord;      // schematic pins by record index
++    std::map<int, SCH_DIRECTIVE_LABEL*> m_parameterSets; // Parameter Set records by index
+     std::map<wxString, SCH_SCREEN*>    m_loadedScreens;     // sub-sheet screens by KiCad file name
+     std::map<int, SCH_SHEET*>          m_sheets;
+     std::map<int, LIB_SYMBOL*>         m_libSymbols;        // every symbol has its unique lib_symbol
