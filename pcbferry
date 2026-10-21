@@ -162,6 +162,28 @@ def drc_counts(path: Path) -> dict:
             "library_issues": {t: types[t] for t in LIBRARY_ISSUES if t in types}}
 
 
+def rules_step(pcbdoc: Path, dru: Path, summary: dict) -> None:
+    """Write the board's scoped Altium rules as KiCad custom rules. Never fails the run."""
+    entry = {"step": "custom rules", "input": str(pcbdoc), "output": str(dru)}
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import pcbferry_dru
+        text, results = pcbferry_dru.custom_rules(pcbdoc)
+        dru.write_text(text)
+        counts = {}
+        for r in results:
+            counts[r["status"]] = counts.get(r["status"], 0) + 1
+        entry.update(ok=True, rules=counts, untranslated=[
+            {"rule": r["name"], "kind": r["kind"], "why": r.get("reason", "")}
+            for r in results if r["status"] in ("untranslatable", "no_equivalent")])
+        log(f"custom rules: {counts.get('translated', 0)} written to {dru.name}, "
+            f"{counts.get('imported', 0)} imported as board settings and netclasses")
+    except Exception as exc:  # olefile missing, unreadable file, ...: the import still runs
+        entry.update(ok=False, errors=[f"{type(exc).__name__}: {exc}"])
+        log(f"warning: custom rules not written ({type(exc).__name__}: {exc})")
+    summary["steps"].append(entry)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         prog="pcbferry",
@@ -178,6 +200,11 @@ def main(argv=None) -> int:
                     help="drop pad and via lands on inner layers where nothing connects, as "
                          "Altium planes have none: Gerbers closer to Altium's (footprints then "
                          "differ from the project libraries and go to the import library)")
+    ap.add_argument("--no-custom-rules", action="store_true",
+                    help="don't write the board's scoped Altium rules to NAME.kicad_dru")
+    ap.add_argument("--fill-zones", action="store_true",
+                    help="fill the zones the import leaves unfilled (Altium planes are computed only "
+                         "when Altium writes output); without it, fill them in pcbnew before plotting")
     ap.add_argument("--footprint-slash", metavar="CHAR",
                     help="replace '/' in footprint names with CHAR (e.g. _), so those footprints "
                          "can be linked to a library; default: keep the names as in Altium")
@@ -225,7 +252,9 @@ def main(argv=None) -> int:
 
     summary = {"tool": f"pcbferry {__version__}", "input": str(src), "output": str(out),
                "project": name, "options": {"remove_unused_lands": args.remove_unused_lands,
-                                            "footprint_slash": args.footprint_slash},
+                                            "footprint_slash": args.footprint_slash,
+                                            "fill_zones": args.fill_zones,
+                                            "custom_rules": not args.no_custom_rules},
                "steps": []}
     kicad_sch = out / f"{name}.kicad_sch"
     kicad_pcb = out / f"{name}.kicad_pcb"
@@ -234,7 +263,12 @@ def main(argv=None) -> int:
     # link from the board part with the same reference in NAME.kicad_pcb.
     # Both write their settings (rules, netclasses, libraries) to NAME.kicad_pro.
     if pcb_src:
+        # Before the import, so --fill-zones fills planes with Altium's plane rules
+        if not args.no_custom_rules:
+            rules_step(pcb_src, out / f"{name}.kicad_dru", summary)
         pcb_args = ["--remove-unused-lands"] if args.remove_unused_lands else []
+        if args.fill_zones:
+            pcb_args += ["--fill-zones"]
         if args.footprint_slash:
             pcb_args += ["--footprint-slash", args.footprint_slash]
         ok &= import_step("pcb", pcb_src, kicad_pcb, reports, summary, pcb_args)

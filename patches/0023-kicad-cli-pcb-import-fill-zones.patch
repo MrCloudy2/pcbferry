@@ -1,0 +1,112 @@
+diff --git a/common/jobs/job_pcb_import.cpp b/common/jobs/job_pcb_import.cpp
+index 0caba22c..6cbbc5b0 100644
+--- a/common/jobs/job_pcb_import.cpp
++++ b/common/jobs/job_pcb_import.cpp
+@@ -53,6 +53,7 @@ JOB_PCB_IMPORT::JOB_PCB_IMPORT() :
+                                                 m_removeUnusedLands ) );
+     m_params.emplace_back( new JOB_PARAM<wxString>( "footprint_slash", &m_footprintSlash,
+                                                     m_footprintSlash ) );
++    m_params.emplace_back( new JOB_PARAM<bool>( "fill_zones", &m_fillZones, m_fillZones ) );
+ }
+ 
+ 
+diff --git a/common/jobs/job_pcb_import.h b/common/jobs/job_pcb_import.h
+index 21cc7602..ee97babb 100644
+--- a/common/jobs/job_pcb_import.h
++++ b/common/jobs/job_pcb_import.h
+@@ -68,6 +68,10 @@ public:
+     /// Replaces '/' in footprint names (a library file name can't hold it, so such footprints
+     /// can't be linked to a library). Empty: names stay as they are.
+     wxString      m_footprintSlash;
++
++    /// Fill the copper zones the import leaves unfilled (Altium planes are computed at output
++    /// time, so the file holds no plane copper).
++    bool          m_fillZones = false;
+ };
+ 
+ #endif
+diff --git a/kicad/cli/command_pcb_import.cpp b/kicad/cli/command_pcb_import.cpp
+index 0b781d12..50b58213 100644
+--- a/kicad/cli/command_pcb_import.cpp
++++ b/kicad/cli/command_pcb_import.cpp
+@@ -32,6 +32,7 @@
+ #define ARG_REPORT_FILE "--report-file"
+ #define ARG_REMOVE_UNUSED_LANDS "--remove-unused-lands"
+ #define ARG_FOOTPRINT_SLASH "--footprint-slash"
++#define ARG_FILL_ZONES "--fill-zones"
+ 
+ 
+ CLI::PCB_IMPORT_COMMAND::PCB_IMPORT_COMMAND() : COMMAND( "import" )
+@@ -68,6 +69,11 @@ CLI::PCB_IMPORT_COMMAND::PCB_IMPORT_COMMAND() : COMMAND( "import" )
+             .help( UTF8STDSTR( _( "Replace '/' in footprint names with this character, so those "
+                                   "footprints can be linked to a library (default: keep '/')" ) ) )
+             .metavar( "CHAR" );
++
++    m_argParser.add_argument( ARG_FILL_ZONES )
++            .help( UTF8STDSTR( _( "Fill the zones the import leaves unfilled (Altium planes, which "
++                                  "Altium computes only when it writes output)" ) ) )
++            .flag();
+ }
+ 
+ 
+@@ -141,6 +147,7 @@ int CLI::PCB_IMPORT_COMMAND::doPerform( KIWAY& aKiway )
+     wxString reportFile = From_UTF8( m_argParser.get<std::string>( ARG_REPORT_FILE ).c_str() );
+     importJob->m_reportFile = reportFile;
+     importJob->m_removeUnusedLands = m_argParser.get<bool>( ARG_REMOVE_UNUSED_LANDS );
++    importJob->m_fillZones = m_argParser.get<bool>( ARG_FILL_ZONES );
+     importJob->m_footprintSlash =
+             From_UTF8( m_argParser.get<std::string>( ARG_FOOTPRINT_SLASH ).c_str() );
+ 
+diff --git a/pcbnew/pcbnew_jobs_handler.cpp b/pcbnew/pcbnew_jobs_handler.cpp
+index 64796599..5286767f 100644
+--- a/pcbnew/pcbnew_jobs_handler.cpp
++++ b/pcbnew/pcbnew_jobs_handler.cpp
+@@ -117,6 +117,7 @@
+ #include <dialogs/dialog_board_stats_job.h>
+ #include <paths.h>
+ #include <tools/zone_filler_tool.h>
++#include <zone_filler.h>
+ 
+ #include "pcbnew_scripting_helpers.h"
+ #include <locale_io.h>
+@@ -3677,6 +3678,40 @@ int PCBNEW_JOBS_HANDLER::JobImport( JOB* aJob )
+             }
+         }
+ 
++        if( job->m_fillZones )
++        {
++            std::vector<ZONE*> unfilled;
++
++            for( ZONE* zone : board->Zones() )
++            {
++                if( !zone->GetIsRuleArea() && !zone->IsFilled() )
++                    unfilled.push_back( zone );
++            }
++
++            if( !unfilled.empty() )
++            {
++                BOARD_DESIGN_SETTINGS& bds = board->GetDesignSettings();
++                bds.m_DRCEngine = std::make_shared<DRC_ENGINE>( board, &bds );
++
++                try
++                {
++                    wxFileName rules( outputPath );
++                    rules.SetExt( FILEEXT::DesignRulesFileExtension );
++                    bds.m_DRCEngine->InitEngine( rules );
++                }
++                catch( ... )
++                {
++                    // No rule file: board settings and netclasses only
++                }
++
++                board->BuildConnectivity();
++                ZONE_FILLER filler( board, nullptr );
++                filler.Fill( unfilled );
++                importMessages.Report( wxString::Format( _( "%zu unfilled zones filled." ), unfilled.size() ),
++                                       RPT_SEVERITY_INFO );
++            }
++        }
++
+         for( const auto& [text, severity] : importMessages.m_messages )
+         {
+             if( severity == RPT_SEVERITY_ERROR )

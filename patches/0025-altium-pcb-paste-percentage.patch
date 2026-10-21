@@ -1,0 +1,76 @@
+diff --git a/pcbnew/pcb_io/altium/altium_parser_pcb.cpp b/pcbnew/pcb_io/altium/altium_parser_pcb.cpp
+index 02f86976..5bdd4946 100644
+--- a/pcbnew/pcb_io/altium/altium_parser_pcb.cpp
++++ b/pcbnew/pcb_io/altium/altium_parser_pcb.cpp
+@@ -962,6 +962,7 @@ ARULE6::ARULE6( ALTIUM_BINARY_PARSER& aReader )
+     {
+         kind = ALTIUM_RULE_KIND::PASTE_MASK_EXPANSION;
+         pastemaskExpansion = ALTIUM_PROPS_UTILS::ReadKicadUnit( props, wxT( "EXPANSION" ), wxT( "0" ) );
++        pastemaskPercent = ALTIUM_PROPS_UTILS::ReadDouble( props, wxT( "PERCENT" ), 0. );
+     }
+     else if( rulekind == wxT( "SolderMaskExpansion" ) )
+     {
+diff --git a/pcbnew/pcb_io/altium/altium_parser_pcb.h b/pcbnew/pcb_io/altium/altium_parser_pcb.h
+index c3620b61..236b80d3 100644
+--- a/pcbnew/pcb_io/altium/altium_parser_pcb.h
++++ b/pcbnew/pcb_io/altium/altium_parser_pcb.h
+@@ -695,7 +695,8 @@ struct ARULE6
+     int soldermaskExpansion = 0;
+ 
+     // ALTIUM_RULE_KIND::PASTE_MASK_EXPANSION
+-    int pastemaskExpansion = 0;
++    int    pastemaskExpansion = 0;
++    double pastemaskPercent = 0.; // change of the paste area in %, replaces the expansion
+ 
+     // ALTIUM_RULE_KIND::POLYGON_CONNECT
+     int32_t              polygonconnectAirgapwidth          = 0;
+diff --git a/pcbnew/pcb_io/altium/altium_pcb.cpp b/pcbnew/pcb_io/altium/altium_pcb.cpp
+index 16cd1218..995bffa5 100644
+--- a/pcbnew/pcb_io/altium/altium_pcb.cpp
++++ b/pcbnew/pcb_io/altium/altium_pcb.cpp
+@@ -3039,7 +3039,22 @@ void ALTIUM_PCB::ParseRules6Data( const ALTIUM_PCB_COMPOUND_FILE&     aAltiumPcb
+         m_board->GetDesignSettings().m_SolderMaskExpansion = soldermaskRule->soldermaskExpansion;
+ 
+     if( pastemaskRule )
+-        m_board->GetDesignSettings().m_SolderPasteMargin = pastemaskRule->pastemaskExpansion;
++    {
++        BOARD_DESIGN_SETTINGS& bds = m_board->GetDesignSettings();
++
++        if( pastemaskRule->pastemaskPercent != 0. )
++        {
++            // Altium shrinks the opening evenly on all sides to the given share of the pad's
++            // area; KiCad's ratio is of the pad's smaller side. Exact for square pads.
++            double area = std::max( 0., 1. + pastemaskRule->pastemaskPercent / 100. );
++            bds.m_SolderPasteMargin = 0;
++            bds.m_SolderPasteMarginRatio = ( std::sqrt( area ) - 1. ) / 2.;
++        }
++        else
++        {
++            bds.m_SolderPasteMargin = pastemaskRule->pastemaskExpansion;
++        }
++    }
+ 
+     std::shared_ptr<NET_SETTINGS> netSettings = m_board->GetDesignSettings().m_NetSettings;
+     std::shared_ptr<NETCLASS>     defaultNetclass = netSettings->GetDefaultNetclass();
+@@ -3562,7 +3577,9 @@ void ALTIUM_PCB::ConvertShapeBasedRegions6ToFootprintItemOnLayer( FOOTPRINT*
+ 
+             if( info.pastemaskexpansionmode == ALTIUM_MODE::MANUAL )
+             {
++                // Altium's manual value replaces the rule, a percentage one included
+                 pad->SetLocalSolderPasteMargin( info.pastemaskexpansionmanual );
++                pad->SetLocalSolderPasteMarginRatio( 0.0 );
+             }
+ 
+             if( info.soldermaskexpansionmode == ALTIUM_MODE::MANUAL )
+@@ -4447,7 +4464,11 @@ void ALTIUM_PCB::ConvertPads6ToFootprintItemOnCopper( FOOTPRINT* aFootprint, con
+     }
+ 
+     if( aElem.pastemaskexpansionmode == ALTIUM_MODE::MANUAL )
++    {
++        // Altium's manual value replaces the rule, a percentage one included
+         pad->SetLocalSolderPasteMargin( aElem.pastemaskexpansionmanual );
++        pad->SetLocalSolderPasteMarginRatio( 0.0 );
++    }
+ 
+     if( aElem.soldermaskexpansionmode == ALTIUM_MODE::MANUAL )
+         pad->SetLocalSolderMaskMargin( aElem.soldermaskexpansionmanual );

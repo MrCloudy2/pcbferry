@@ -13,7 +13,7 @@ ARG ARCH_SNAPSHOT=2026/10/12
 # Runtime libraries of kicad-cli + kifaces (Arch's kicad package, minus the
 # GUI-only wxPython). Shared by both stages.
 ARG RUNTIME_PKGS="boost-libs fontconfig zstd abseil-cpp freetype2 libsecret glib2 gtk3 glu \
-    cairo harfbuzz libglvnd libspnav wxwidgets-gtk3 zlib curl glm ngspice opencascade python \
+    cairo harfbuzz libglvnd libspnav wxwidgets-gtk3 zlib curl glm ngspice opencascade python python-olefile \
     webkit2gtk-4.1 unixodbc libgit2 nng protobuf poppler-glib"
 
 FROM ${ARCH_IMAGE} AS base
@@ -93,7 +93,7 @@ RUN pacman -Sy --noconfirm --needed ttf-liberation \
 COPY --from=build /install/ /
 # Hand-installed binaries keep their build-tree RPATH; point the loader at lib/.
 RUN echo ${PREFIX}/lib > /etc/ld.so.conf.d/kicad-altium.conf && ldconfig
-COPY pcbferry /usr/local/bin/pcbferry
+COPY pcbferry pcbferry_dru.py /usr/local/bin/
 COPY LICENSE README.md /usr/share/doc/pcbferry/
 
 ENV PATH=${PREFIX}/bin:${PATH} \
