@@ -5,6 +5,13 @@
 unset PYTHONHOME PYTHONPATH LD_PRELOAD LD_LIBRARY_PATH GIO_MODULE_DIR GIO_EXTRA_MODULES \
     GDK_PIXBUF_MODULE_FILE
 cd "$(dirname "$0")" || exit 1
+# KiCad doesn't show a plugin's output anywhere: keep it for when something goes wrong
+case $(uname -s) in
+    Darwin) log_dir="$HOME/Library/Application Support/pcbferry" ;;
+    *) log_dir="${XDG_DATA_HOME:-$HOME/.local/share}/pcbferry" ;;
+esac
+mkdir -p "$log_dir" && exec >>"$log_dir/plugin.log" 2>&1
+echo "--- $(date)"
 for py in python3 python; do
     command -v "$py" >/dev/null 2>&1 && exec "$py" import_altium.py
 done

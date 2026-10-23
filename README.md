@@ -51,9 +51,18 @@ docker run --rm -v "$PWD:/work" -w /work ghcr.io/mrcloudy2/pcbferry Board.PrjPcb
 No Docker needed: install `pcbferry-kicad-plugin-VERSION.zip` from the
 [latest release](https://github.com/MrCloudy2/pcbferry/releases/latest) in KiCad 10 with
 **Plugin and Content Manager → Install from File…**, and answer *Yes* when KiCad
-asks to enable its API. The PCB and schematic editors then have a pcbferry button: pick
-a `.PrjPcb`, and the project is converted into `NAME-kicad/` next to it and opened.
-The first use downloads the converter engine (about 150 MB) from the same release.
+asks to enable its API. The PCB and schematic editors then have a pcbferry button with
+two ways to convert:
+
+- **Into the open project.** Make an empty KiCad project where you want the design, open
+  its schematic editor, click the button and pick the `.PrjPcb`. The converted files take
+  your project's name; close the project when pcbferry asks, reopen it, and the design is
+  there. Anything the project already held is kept in `NAME-before-pcbferry/`.
+- **Into a new folder.** Pick a project, a single `.SchDoc` or a single `.PcbDoc`, then a
+  folder: the result goes in `NAME-kicad/` inside it.
+
+The first use downloads the converter engine (about 150 MB) from the same release. If
+nothing happens on a click, `~/.local/share/pcbferry/plugin.log` says why.
 
 The engine is the same patched `kicad-cli` as in the container, so results are
 identical. Windows and macOS engines are next; until then use the container there.

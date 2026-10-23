@@ -195,10 +195,18 @@ def ask(text: str, yes: str, no: str) -> bool:
 
 
 class Busy:
-    """A 'working…' indicator while a long step runs (best effort; never blocks)."""
+    """A 'working…' indicator while a long step runs (best effort; never blocks).
 
-    def __init__(self, text: str):
-        self.text, self.proc = text, None
+    With cancellable=True the window can be closed; `cancelled` then turns true (Windows
+    and zenity only; elsewhere it stays false).
+    """
+
+    def __init__(self, text: str, cancellable: bool = False):
+        self.text, self.cancellable, self.proc = text, cancellable, None
+
+    @property
+    def cancelled(self) -> bool:
+        return self.cancellable and self.proc is not None and self.proc.poll() is not None
 
     def __enter__(self):
         try:
@@ -208,7 +216,8 @@ class Busy:
                      "Add-Type -AssemblyName System.Windows.Forms; "
                      "$f = New-Object System.Windows.Forms.Form; $f.Text = 'pcbferry'; "
                      "$f.Width = 420; $f.Height = 120; $f.StartPosition = 'CenterScreen'; "
-                     "$f.TopMost = $true; $f.ControlBox = $false; "
+                     "$f.TopMost = $true; "
+                     f"$f.ControlBox = ${str(self.cancellable).lower()}; "
                      "$l = New-Object System.Windows.Forms.Label; $l.Dock = 'Fill'; "
                      f"$l.TextAlign = 'MiddleCenter'; $l.Text = {_ps_str(self.text)}; "
                      "$f.Controls.Add($l); [System.Windows.Forms.Application]::Run($f)"],
@@ -218,8 +227,9 @@ class Busy:
                       f"with title {_as_str(TITLE)}"])
             elif shutil.which("zenity"):
                 self.proc = subprocess.Popen(
-                    ["zenity", "--progress", "--pulsate", "--no-cancel", "--auto-close",
-                     "--title", TITLE, "--text", self.text], stdin=subprocess.PIPE)
+                    ["zenity", "--progress", "--pulsate", "--auto-close", "--width", "460",
+                     "--title", TITLE, "--text", self.text]
+                    + ([] if self.cancellable else ["--no-cancel"]), stdin=subprocess.PIPE)
             elif shutil.which("kdialog"):
                 _run(["kdialog", "--title", TITLE, "--passivepopup", self.text, "8"])
         except OSError:
