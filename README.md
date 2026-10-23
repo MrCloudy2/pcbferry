@@ -61,6 +61,10 @@ two ways to convert:
 - **Into a new folder.** Pick a project, a single `.SchDoc` or a single `.PcbDoc`, then a
   folder: the result goes in `NAME-kicad/` inside it.
 
+Install it from KiCad 10.0.1 or later: KiCad 10.0.0's package manager drops the plugin
+script's executable bit, and the button then does nothing. KiCads that share the same
+settings, such as a distribution package and an AppImage, share the installed plugin.
+
 The first use downloads the converter engine (about 150 MB) from the same release. If
 nothing happens on a click, `~/.local/share/pcbferry/plugin.log` says why.
 
