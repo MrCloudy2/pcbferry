@@ -4,7 +4,7 @@
 (schematics, board, libraries, design rules) into a ready-to-open KiCad 10
 project from the command line.
 
-pcbferry is KiCad 10.0.7's own Altium importer with 25 patches that fix what it
+pcbferry is KiCad 10.0.7's own Altium importer with 26 patches that fix what it
 gets wrong, built headless (`kicad-cli` only), plus a small wrapper that turns a
 `.PrjPcb` into a KiCad project folder. The output is a plain KiCad 10 project:
 open it with any KiCad 10.0.x.
@@ -147,17 +147,17 @@ one library entry per form: `NAME`, `NAME (2)`, `NAME (3)`, ...
   writes output, so the PcbDoc holds no plane copper and the imported plane
   zones are unfilled. Convert with `--fill-zones`, or press B in pcbnew, or the
   inner planes come out empty.
-- **Plane clearances.** Altium draws no pad lands on plane layers and measures
-  plane clearance from the drilled hole; KiCad keeps the lands and measures
-  from them. Electrically it is the same board; filled planes differ from
-  Altium's by about 5–10 % of their area. `--remove-unused-lands` drops pad and
-  via lands on inner layers where nothing connects, which brings planes close to
-  Altium's but also removes lands Altium keeps on inner *signal* layers, and
-  through-hole footprints then differ from the project's library copies (they
-  go to `NAME-import-fps`). It pays off only where planes outweigh inner signal
-  layers (copper differing from Altium's, default → with the option: 6 planes:
-  4,959 → 1,477 mm²; 2 planes: 1,489 → 867 mm²; 1 plane and 3 inner signal
-  layers: 1,777 → 3,240 mm²; no planes: 12.6 → 758 mm²). Off by default.
+- **Planes.** Altium draws no pad lands on internal plane layers and clears a
+  plane from the drilled hole; KiCad clears it from the land, which at tight
+  pitch (BGA fields, connectors) cuts the plane apart and leaves pins
+  unconnected. On boards with internal planes, vias and plated pads that cross
+  a plane therefore keep a land only where something connects (KiCad's "remove
+  unconnected layers"; those through-hole footprints then live in
+  `NAME-import-fps`). Board connectivity checked against Altium's own DRC
+  (unrouted connections) is equal on 8 of 9 boards. `--remove-unused-lands`
+  applies the same to every plated pad and via, also on boards without planes:
+  closer to Altium's Gerbers for plane-heavy boards, but lands Altium keeps on
+  inner signal layers go too.
 - **Text:** KiCad's stroke font is narrower than Altium's, and TrueType text
   needs the font installed (Liberation Sans stands in for Arial in the image).
 - Footprint "board cutout" regions that overlap the board edge are added to
@@ -214,6 +214,7 @@ order.
 | `0023` `pcb import --fill-zones` | – | fills the zones the import leaves unfilled |
 | `0024` schematic Parameter Sets and Blankets | rejected ("not currently supported"): net classes and differential-pair directives set in the schematic are lost | directive labels (`ClassName` → Netclass field) and rule areas |
 | `0025` paste percentage | Altium's paste rule as a percentage of pad area ignored, and its −0.02 mm expansion used instead (MISKO3: 47 mm² of extra paste) | KiCad paste ratio; pads with their own value keep it |
+| `0026` board connectivity | vias and pads keep lands on Altium plane layers, so KiCad's clearances cut planes apart at tight pitch (FPGA3: 25 unconnected items, Kasli connector GND pins); vias that drop lands lose their connection to imported pours; pads smaller than their hole connect to nothing | lands only where connected on plane layers; pours and off-centre track ends stay connected; equal to Altium's DRC on 8 of 9 boards |
 
 ## Relation to KiCad
 
