@@ -1,0 +1,235 @@
+diff --git a/pcbnew/pcb_io/altium/altium_pcb.cpp b/pcbnew/pcb_io/altium/altium_pcb.cpp
+index 995bffa5..e80dcfe8 100644
+--- a/pcbnew/pcb_io/altium/altium_pcb.cpp
++++ b/pcbnew/pcb_io/altium/altium_pcb.cpp
+@@ -797,6 +797,124 @@ void ALTIUM_PCB::Parse( const ALTIUM_PCB_COMPOUND_FILE&              altiumPcbFi
+         }
+     }
+ 
++    // Altium draws no lands on internal planes and clears a plane from the hole; KiCad clears it
++    // from the land, which cuts planes apart between tight-pitch pins (Kasli: connector GND pins
++    // cut off). Plated pads crossing a plane keep lands only where something connects, as vias
++    // on planes do (see ParseVias6Data).
++    LSET planeLayers;
++
++    for( PCB_LAYER_ID layer : LSET( m_board->GetEnabledLayers() & LSET::InternalCuMask() ).Seq() )
++    {
++        if( m_board->GetLayerType( layer ) == LT_POWER )
++            planeLayers.set( layer );
++    }
++
++    if( planeLayers.any() )
++    {
++        for( FOOTPRINT* fp : m_board->Footprints() )
++        {
++            for( PAD* pad : fp->Pads() )
++            {
++                if( pad->GetAttribute() == PAD_ATTRIB::PTH
++                    && pad->Padstack().UnconnectedLayerMode() == UNCONNECTED_LAYER_MODE::KEEP_ALL
++                    && ( pad->GetLayerSet() & planeLayers ).any() )
++                {
++                    pad->Padstack().SetUnconnectedLayerMode( UNCONNECTED_LAYER_MODE::REMOVE_EXCEPT_START_AND_END );
++                }
++            }
++        }
++    }
++
++    // A via or pad that drops unconnected lands keeps its land where an imported pour of its net
++    // covers it: KiCad only learns that when it fills the zone itself, and the pours come filled
++    // from Altium. And Altium connects a track or arc ending anywhere on the land, KiCad only at
++    // the item when the land may go: such ends get a short stub of the same width to the centre,
++    // inside the land, so nothing else moves.
++    std::vector<PCB_TRACK*> stubs;
++
++    auto keepLands = [&]( BOARD_CONNECTED_ITEM* aItem, const VECTOR2I& aPos,
++                          const std::function<int( PCB_LAYER_ID )>& aRadius,
++                          const std::function<void( PCB_LAYER_ID )>& aFlash )
++    {
++        for( PCB_LAYER_ID layer : LSET( aItem->GetLayerSet() & LSET::AllCuMask() ).Seq() )
++        {
++            int radius = aRadius( layer );
++
++            for( PCB_TRACK* other : m_board->Tracks() )
++            {
++                if( ( other->Type() != PCB_TRACE_T && other->Type() != PCB_ARC_T )
++                    || other->GetLayer() != layer || other->GetNetCode() != aItem->GetNetCode() )
++                {
++                    continue;
++                }
++
++                for( const VECTOR2I& end : { other->GetStart(), other->GetEnd() } )
++                {
++                    // Overlapping copper counts, not only the centre line
++                    if( end != aPos && ( end - aPos ).EuclideanNorm() <= radius + other->GetWidth() / 2 )
++                    {
++                        PCB_TRACK* stub = new PCB_TRACK( m_board );
++                        stub->SetStart( end );
++                        stub->SetEnd( aPos );
++                        stub->SetWidth( other->GetWidth() );
++                        stub->SetLayer( layer );
++                        stub->SetNetCode( other->GetNetCode() );
++                        stubs.push_back( stub );
++                    }
++                }
++            }
++
++            for( ZONE* zone : m_polygons )
++            {
++                if( zone && zone->GetNetCode() == aItem->GetNetCode() && zone->IsOnLayer( layer )
++                    && zone->HasFilledPolysForLayer( layer )
++                    && zone->GetFilledPolysList( layer )->Collide( aPos, radius ) )
++                {
++                    aFlash( layer );
++                    break;
++                }
++            }
++        }
++    };
++
++    for( PCB_TRACK* track : m_board->Tracks() )
++    {
++        if( track->Type() != PCB_VIA_T )
++            continue;
++
++        PCB_VIA* via = static_cast<PCB_VIA*>( track );
++
++        if( via->Padstack().UnconnectedLayerMode() == UNCONNECTED_LAYER_MODE::KEEP_ALL )
++            continue;
++
++        keepLands( via, via->GetPosition(),
++                   [&]( PCB_LAYER_ID aLayer ) { return via->GetWidth( aLayer ) / 2; },
++                   [&]( PCB_LAYER_ID aLayer ) { via->SetZoneLayerOverride( aLayer, ZLO_FORCE_FLASHED ); } );
++    }
++
++    for( FOOTPRINT* fp : m_board->Footprints() )
++    {
++        for( PAD* pad : fp->Pads() )
++        {
++            if( pad->GetAttribute() != PAD_ATTRIB::PTH
++                || pad->Padstack().UnconnectedLayerMode() == UNCONNECTED_LAYER_MODE::KEEP_ALL )
++            {
++                continue;
++            }
++
++            keepLands( pad, pad->GetPosition(),
++                       [&]( PCB_LAYER_ID aLayer )
++                       {
++                           VECTOR2I size = pad->GetSize( aLayer );
++                           return std::min( size.x, size.y ) / 2;
++                       },
++                       [&]( PCB_LAYER_ID aLayer ) { pad->SetZoneLayerOverride( aLayer, ZLO_FORCE_FLASHED ); } );
++        }
++    }
++
++    for( PCB_TRACK* stub : stubs )
++        m_board->Add( stub, ADD_MODE::APPEND );
++
+     // Altium doesn't appear to store either the dimension value nor the dimensioned object in
+     // the dimension record.  (Yes, there is a REFERENCE0OBJECTID, but it doesn't point to the
+     // dimensioned object.)  We attempt to plug this gap by finding a colocated arc or circle
+@@ -2917,6 +3035,10 @@ void ALTIUM_PCB::ParsePolygons6Data( const ALTIUM_PCB_COMPOUND_FILE&     aAltium
+ 
+         if( IsAltiumLayerAPlane( elem.layer ) )
+         {
++            // Altium keeps every neck of a plane; KiCad's default minimum width (0.25 mm) cuts
++            // the plane apart between dense pins (BGA fields, connectors) and strands vias.
++            zone->SetMinThickness( std::min( zone->GetMinThickness(), pcbIUScale.mmToIU( 0.05 ) ) );
++
+             // outer zone will be set to priority 0 later.
+             zone->SetAssignedPriority( 1 );
+ 
+@@ -4495,6 +4617,15 @@ void ALTIUM_PCB::ConvertPads6ToFootprintItemOnCopper( FOOTPRINT* aFootprint, con
+             // Nor does Altium open the mask or paste for it
+             pad->SetLayerSet( pad->GetLayerSet() & LSET::AllCuMask() );
+         }
++        else if( pad->GetAttribute() == PAD_ATTRIB::PTH && pad->Padstack().Mode() == PADSTACK::MODE::NORMAL
++                 && ( size.x < pad->GetDrillSize().x || size.y < pad->GetDrillSize().y ) )
++        {
++            // A plated hole with a pad smaller than the hole (mounting holes): the copper is
++            // drilled away, and Altium connects planes and pours to the hole. KiCad gives a pad
++            // smaller than its hole no land, so nothing would connect.
++            pad->SetSize( PADSTACK::ALL_LAYERS, VECTOR2I( std::max( size.x, pad->GetDrillSize().x ),
++                                                          std::max( size.y, pad->GetDrillSize().y ) ) );
++        }
+     }
+ 
+     aFootprint->Add( pad.release(), ADD_MODE::APPEND );
+@@ -4894,11 +5025,26 @@ void ALTIUM_PCB::ParseVias6Data( const ALTIUM_PCB_COMPOUND_FILE&     aAltiumPcbF
+                 innerRemoved = true;
+         }
+ 
++        // Altium draws no lands on internal planes, and clears a plane from the via's hole: keep
++        // a land there only where the via connects, or KiCad's larger clearances (measured from
++        // the land) cut planes apart in dense via fields (FPGA3: 25 unconnected items).
++        if( !innerRemoved && !endRemoved )
++        {
++            for( PCB_LAYER_ID layer : LSET( via->GetLayerSet() & LSET::InternalCuMask() ).Seq() )
++            {
++                if( m_board->GetLayerType( layer ) == LT_POWER )
++                {
++                    innerRemoved = true;
++                    break;
++                }
++            }
++        }
++
+         if( innerRemoved || endRemoved )
+         {
+-            via->Padstack().SetUnconnectedLayerMode(
+-                    endRemoved ? UNCONNECTED_LAYER_MODE::REMOVE_ALL
+-                               : UNCONNECTED_LAYER_MODE::REMOVE_EXCEPT_START_AND_END );
++            // Start and end lands stay: Altium removes them under a pad that covers the via
++            // (via in pad), and KiCad would not join the pad to an unflashed via
++            via->Padstack().SetUnconnectedLayerMode( UNCONNECTED_LAYER_MODE::REMOVE_EXCEPT_START_AND_END );
+         }
+ 
+         // Altium can size the solder mask opening from the hole edge instead of the via land.
+diff --git a/pcbnew/pcbnew_jobs_handler.cpp b/pcbnew/pcbnew_jobs_handler.cpp
+index 5286767f..440ddca5 100644
+--- a/pcbnew/pcbnew_jobs_handler.cpp
++++ b/pcbnew/pcbnew_jobs_handler.cpp
+@@ -3619,6 +3619,44 @@ int PCBNEW_JOBS_HANDLER::JobImport( JOB* aJob )
+                     removeUnused( static_cast<PCB_VIA*>( track )->Padstack() );
+             }
+ 
++            // Pours imported already filled connect only where a land is kept: mark those layers
++            // as the zone filler would.
++            auto keepInPours = [&]( BOARD_CONNECTED_ITEM* aItem, const VECTOR2I& aPos, int aRadius )
++            {
++                for( PCB_LAYER_ID layer : LSET( aItem->GetLayerSet() & LSET::AllCuMask() ).Seq() )
++                {
++                    for( ZONE* zone : board->Zones() )
++                    {
++                        if( !zone->GetIsRuleArea() && zone->GetNetCode() == aItem->GetNetCode()
++                            && zone->IsOnLayer( layer ) && zone->HasFilledPolysForLayer( layer )
++                            && zone->GetFilledPolysList( layer )->Collide( aPos, aRadius ) )
++                        {
++                            if( aItem->Type() == PCB_VIA_T )
++                                static_cast<PCB_VIA*>( aItem )->SetZoneLayerOverride( layer, ZLO_FORCE_FLASHED );
++                            else
++                                static_cast<PAD*>( aItem )->SetZoneLayerOverride( layer, ZLO_FORCE_FLASHED );
++
++                            break;
++                        }
++                    }
++                }
++            };
++
++            for( FOOTPRINT* fp : board->Footprints() )
++            {
++                for( PAD* pad : fp->Pads() )
++                {
++                    if( pad->GetAttribute() == PAD_ATTRIB::PTH )
++                        keepInPours( pad, pad->GetPosition(), pad->GetDrillSize().x / 2 );
++                }
++            }
++
++            for( PCB_TRACK* track : board->Tracks() )
++            {
++                if( track->Type() == PCB_VIA_T )
++                    keepInPours( track, track->GetPosition(), static_cast<PCB_VIA*>( track )->GetDrillValue() / 2 );
++            }
++
+             importMessages.Report( wxString::Format( _( "Unused inner lands removed on %d pads "
+                                                         "and vias." ), changed ),
+                                    RPT_SEVERITY_INFO );
