@@ -49,7 +49,11 @@ def main() -> None:
     platforms = sorted({k.split("-")[0] for k in files}) or ["linux", "macos", "windows"]
 
     version = {"version": args.version, "status": "stable", "kicad_version": "10.0",
-               "runtime": "ipc", "platforms": platforms}
+               "runtime": "ipc", "platforms": platforms,
+               # PCM's Download button (save the package) needs it even for a package
+               # installed from file
+               "download_url": f"{URL}/releases/download/v{args.version}/"
+                               f"pcbferry-kicad-plugin-{args.version}.zip"}
     metadata = {
         "$schema": "https://go.kicad.org/pcm/schemas/v1",
         "name": "pcbferry: Altium importer",
@@ -82,8 +86,7 @@ def main() -> None:
             {"version": args.version, "base_url": base_url, "files": files}, indent=2))
 
     # A PCM repository (add its URL under Manage → repositories) listing this package
-    version.update(download_url=f"{URL}/releases/download/v{args.version}/{zpath.name}",
-                   download_sha256=sha256(zpath), download_size=zpath.stat().st_size,
+    version.update(download_sha256=sha256(zpath), download_size=zpath.stat().st_size,
                    install_size=sum(i.file_size for i in zipfile.ZipFile(zpath).infolist()))
     listing = dict(metadata, versions=[version])
     (args.out / "packages.json").write_text(json.dumps({"packages": [listing]}, indent=2))
