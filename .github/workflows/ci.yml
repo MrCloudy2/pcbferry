@@ -26,9 +26,9 @@ jobs:
 
       - name: Wrapper scripts
         run: |
-          python3 -m py_compile pcbferry pcbferry_dru.py
+          python3 -m py_compile pcbferry pcbferry_dru.py pcbferry-container
           python3 pcbferry --help > /dev/null
-          shellcheck build.sh pcbferry-container
+          shellcheck build.sh
 
       - name: Patches apply to the pinned KiCad
         run: |

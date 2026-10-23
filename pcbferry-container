@@ -1,54 +1,143 @@
-#!/usr/bin/env bash
-# Run pcbferry from the container image, mapping host paths in and out.
-#
-#   pcbferry-container [options] INPUT OUTPUT_DIR
-#
-# INPUT's folder is mounted read-only. A .PrjPcb that lists documents outside
-# its own folder (../Libraries/...) needs PCBFERRY_ROOT set to a folder
-# containing all of them. Options are passed through; --board's path must also
-# be under that folder.
-#
-# Environment: PCBFERRY_IMAGE (default localhost/pcbferry:latest),
-#              PCBFERRY_ENGINE (podman or docker; default: whichever exists).
-set -euo pipefail
+#!/usr/bin/env python3
+"""Run pcbferry from its container image, on Linux, macOS or Windows.
 
-image=${PCBFERRY_IMAGE:-localhost/pcbferry:latest}
-engine=${PCBFERRY_ENGINE:-$(command -v podman >/dev/null && echo podman || echo docker)}
+    pcbferry-container [options] INPUT OUTPUT_DIR        (Windows: py pcbferry-container ...)
 
-opts=() pos=() board=
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --name|--footprint-slash) opts+=("$1" "$2"); shift ;;
-        --board) board=$2; shift ;;
-        --board=*) board=${1#--board=} ;;
-        -*) opts+=("$1") ;;
-        *) pos+=("$1") ;;
-    esac
-    shift
-done
-if [[ ${#pos[@]} -ne 2 ]]; then
-    exec "$engine" run --rm "$image" "${opts[@]:---help}"
-fi
+Needs Docker (Docker Desktop on Windows and macOS) or Podman. The image is pulled on
+first use. INPUT's project folder is mounted read-only and OUTPUT_DIR read-write; when a
+.PrjPcb lists documents or libraries outside its own folder (..\\Libraries\\...), the
+common parent folder is mounted instead, so they are found. All pcbferry options pass
+through (see `pcbferry-container --help`).
 
-input=$(realpath -- "${pos[0]}")
-output=$(realpath -m -- "${pos[1]}")
-root=$(realpath -- "${PCBFERRY_ROOT:-$(dirname -- "$input")}")
-case $input in "$root"/*) ;; *) echo "pcbferry: $input is not under $root" >&2; exit 2 ;; esac
-mkdir -p -- "$output"
-if [[ -n $board ]]; then
-    board=$(realpath -- "$board")
-    case $board in "$root"/*) ;; *) echo "pcbferry: $board is not under $root" >&2; exit 2 ;; esac
-    opts+=(--board "/in/${board#"$root"/}")
-fi
+Environment: PCBFERRY_IMAGE  (default ghcr.io/mrcloudy2/pcbferry:latest)
+             PCBFERRY_ENGINE (docker or podman; default: whichever is installed)
+             PCBFERRY_ROOT   (folder to mount, overriding the automatic choice)
+"""
+from __future__ import annotations
 
-user=(--user "$(id -u):$(id -g)")
-[[ $(basename -- "$engine") == podman ]] && user=(--userns=keep-id)
+import configparser
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path, PurePosixPath
 
-# Docker Hub's image name has no localhost/ prefix.
-if [[ $(basename -- "$engine") == docker && $image == localhost/* ]]; then
-    image=${image#localhost/}
-fi
+IMAGE = os.environ.get("PCBFERRY_IMAGE", "ghcr.io/mrcloudy2/pcbferry:latest")
+VALUE_OPTIONS = {"--name", "--footprint-slash", "--board"}
 
-exec "$engine" run --rm "${user[@]}" \
-    -v "$root:/in:ro" -v "$output:/out" \
-    "$image" "${opts[@]}" "/in/${input#"$root"/}" /out
+
+def engine() -> str:
+    chosen = os.environ.get("PCBFERRY_ENGINE")
+    if chosen:
+        return chosen
+    for name in ("docker", "podman"):
+        if shutil.which(name):
+            return name
+    sys.exit("pcbferry: neither docker nor podman found; install Docker Desktop "
+             "(https://www.docker.com/products/docker-desktop/) or Podman")
+
+
+def find(base: Path, rel: str) -> Path | None:
+    """A path from a .PrjPcb (written on Windows: backslashes, any case)."""
+    path = base
+    for part in PurePosixPath(rel.replace("\\", "/")).parts:
+        if part == "..":
+            path = path.parent
+        elif path.is_dir():
+            match = next((p for p in path.iterdir() if p.name.lower() == part.lower()), None)
+            if match is None:
+                return None
+            path = match
+        else:
+            return None
+    return path
+
+
+def project_files(prjpcb: Path) -> list[Path]:
+    raw = prjpcb.read_bytes()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw.decode("latin-1")
+    parser = configparser.ConfigParser(interpolation=None, strict=False)
+    parser.optionxform = str
+    parser.read_string(text)
+    files = []
+    for section in parser.sections():
+        rel = parser[section].get("DocumentPath", "")
+        path = find(prjpcb.parent, rel) if rel else None
+        if path and path.is_file():
+            files.append(path.resolve())
+    return files
+
+
+def mount_root(src: Path, extra: list[Path]) -> Path:
+    if os.environ.get("PCBFERRY_ROOT"):
+        return Path(os.environ["PCBFERRY_ROOT"]).resolve()
+    paths = [src.parent, *(p.parent for p in extra)]
+    if src.suffix.lower() == ".prjpcb":
+        paths += [p.parent for p in project_files(src)]
+    try:
+        root = Path(os.path.commonpath([str(p) for p in paths]))
+    except ValueError:  # files on different Windows drives
+        root = None
+    if root is None or root == Path(root.anchor):
+        print(f"pcbferry: the project's files are spread over {root or 'several drives'}; "
+              f"mounting only {src.parent} (set PCBFERRY_ROOT to choose)", file=sys.stderr)
+        return src.parent
+    return root
+
+
+def inside(path: Path, root: Path) -> str:
+    """Container path of a host file under the mounted root."""
+    try:
+        rel = path.relative_to(root)
+    except ValueError:
+        sys.exit(f"pcbferry: {path} is not under {root} (set PCBFERRY_ROOT)")
+    return "/in/" + "/".join(rel.parts)
+
+
+def main(argv: list[str]) -> int:
+    opts, pos, board = [], [], None
+    it = iter(argv)
+    for arg in it:
+        name = arg.split("=", 1)[0]
+        if name in VALUE_OPTIONS:
+            value = arg.split("=", 1)[1] if "=" in arg else next(it, None)
+            if value is None:
+                sys.exit(f"pcbferry: {name} needs a value")
+            if name == "--board":
+                board = Path(value).resolve()
+            else:
+                opts += [name, value]
+        elif arg.startswith("-"):
+            opts.append(arg)
+        else:
+            pos.append(arg)
+
+    run = [engine(), "run", "--rm"]
+    if len(pos) != 2:  # --help, --version, or a usage error: let pcbferry answer
+        return subprocess.call(run + [IMAGE, *opts, *pos])
+
+    src = Path(pos[0]).resolve()
+    out = Path(pos[1]).resolve()
+    if not src.is_file():
+        sys.exit(f"pcbferry: {pos[0]}: no such file")
+    root = mount_root(src, [board] if board else [])
+    out.mkdir(parents=True, exist_ok=True)
+    if board:
+        opts += ["--board", inside(board, root)]
+
+    # Files written to OUTPUT_DIR belong to you (Linux; Docker Desktop maps this itself)
+    if os.name == "posix" and sys.platform != "darwin":
+        if Path(run[0]).name == "podman":
+            run.append("--userns=keep-id")
+        else:
+            run += ["--user", f"{os.getuid()}:{os.getgid()}"]
+
+    run += ["-v", f"{root}:/in:ro", "-v", f"{out}:/out", IMAGE, *opts, inside(src, root), "/out"]
+    return subprocess.call(run)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
