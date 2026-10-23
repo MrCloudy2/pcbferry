@@ -1,9 +1,10 @@
 """KiCad action: convert Altium designs with pcbferry.
 
 Asks what to do:
-- import an Altium project into the project open in KiCad: the converted files take the
-  open project's name; once the project is closed in KiCad they replace its files (the
-  old ones are kept in NAME-before-pcbferry/), and reopening it shows the design;
+- import an Altium project in place of the project open in KiCad (typically a new, empty
+  one made where the design should go): the design is converted under its Altium name
+  into that folder; once KiCad is closed the open project's files are moved aside into
+  NAME-before-pcbferry/ and KiCad is started again with the converted project;
 - or convert a project, schematic or board into FOLDER/NAME-kicad/ and open that.
 The first run downloads the engine.
 """
@@ -25,14 +26,19 @@ import dialogs  # noqa: E402
 import engine  # noqa: E402
 
 SETTINGS = engine.data_dir() / "settings.json"
-# (menu entry, file patterns, file dialog title)
-INTO_PROJECT = ("Import an Altium project into this project ({name})", ["*.PrjPcb"],
-                "Altium project to import")
+# (menu title, menu description, file patterns, file dialog title)
+INTO_PROJECT = ("Import an Altium project here",
+                "Converts an Altium project into this folder in place of {name} (moved "
+                "aside, not deleted). KiCad then restarts with the converted project.",
+                ["*.PrjPcb"], "Altium project to import")
 ACTIONS = [
-    ("Convert an Altium project (.PrjPcb) into a new folder", ["*.PrjPcb"],
-     "Altium project to convert"),
-    ("Convert a single Altium schematic (.SchDoc)", ["*.SchDoc"], "Altium schematic to convert"),
-    ("Convert a single Altium board (.PcbDoc)", ["*.PcbDoc"], "Altium board to convert"),
+    ("Convert an Altium project to a new folder",
+     "Schematics, board, libraries and design rules from a .PrjPcb, into a folder you pick.",
+     ["*.PrjPcb"], "Altium project to convert"),
+    ("Convert a single schematic", "One .SchDoc sheet, into a folder you pick.",
+     ["*.SchDoc"], "Altium schematic to convert"),
+    ("Convert a single board", "One .PcbDoc, into a folder you pick.",
+     ["*.PcbDoc"], "Altium board to convert"),
 ]
 
 
@@ -134,10 +140,9 @@ def lock():
     return path
 
 
-def convert(cli: Path, src: Path, out: Path, name: str | None = None) -> tuple[bool, str]:
+def convert(cli: Path, src: Path, out: Path) -> tuple[bool, str]:
     env = dict(os.environ, KICAD_CLI=str(cli), PYTHONIOENCODING="utf-8")
-    cmd = [sys.executable, str(HERE / "pcbferry"), "--check", "--fill-zones",
-           *(["--name", name] if name else []), str(src), str(out)]
+    cmd = [sys.executable, str(HERE / "pcbferry"), "--check", "--fill-zones", str(src), str(out)]
     proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
                           env=env, creationflags=dialogs.NO_WINDOW)
     log = proc.stdout + proc.stderr
@@ -182,48 +187,106 @@ def finish_message(notes: list[str], head: str, tail: str) -> str:
                    "things. Reports are in import-reports/.\n\n" + tail)
 
 
-def import_into(cli: Path, src: Path, project: Path) -> int:
-    name, folder = project.stem, project.parent
-    if has_design(project) and not dialogs.ask(
-            f"{name} already has a schematic or board. Importing replaces them; the current "
-            f"files are kept in {name}-before-pcbferry/.\n\nImport anyway?", "Import", "Cancel"):
+def kicad_program() -> list[str] | None:
+    """How to start the KiCad that started us (the project manager, even when we were
+    started from a standalone editor). Must be called while that KiCad still runs."""
+    if sys.platform == "darwin":
+        return ["open"]  # .kicad_pro opens in KiCad
+    if sys.platform == "win32":
+        return None  # os.startfile
+    try:
+        ppid = os.getppid()
+        argv0 = Path(Path(f"/proc/{ppid}/cmdline").read_bytes().split(b"\0")[0].decode())
+        exe = Path(os.readlink(f"/proc/{ppid}/exe"))
+    except OSError:
+        return ["xdg-open"]
+    # AppImages start through a launcher (argv[0]); distro builds are the binary itself
+    program = argv0 if argv0.is_absolute() else Path(shutil.which(str(argv0)) or exe)
+    kicad = program.with_name("kicad")
+    return [str(kicad if kicad.exists() else program)]
+
+
+def start_kicad(program: list[str] | None, project: Path) -> None:
+    if program is None:
+        os.startfile(project)  # noqa: S606
+        return
+    subprocess.Popen([*program, str(project)], stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True, cwd=project.parent)
+
+
+def parent_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def import_into(cli: Path, src: Path, current: Path, program: list[str] | None) -> int:
+    old, folder = current.stem, current.parent
+    if has_design(current) and not dialogs.ask(
+            f"{old} already has a schematic or board. The import moves it into "
+            f"{old}-before-pcbferry/.\n\nImport anyway?", "Import", "Cancel"):
         return 0
-    staged = unique(folder / f"{name}-pcbferry-import")
+    staged = unique(folder / f"{src.stem}-pcbferry-import")
     with dialogs.Busy(f"Converting {src.name}…"):
-        convert(cli, src, staged, name=name)
+        convert(cli, src, staged)
     notes = report(staged)
-    if not (staged / f"{name}.kicad_pro").is_file():
+    converted = next(staged.glob("*.kicad_pro"), None)
+    if converted is None:
         dialogs.message(f"{src.name} couldn't be converted.\n\n" + "\n".join(notes)
                         + f"\n\nDetails: {staged / 'import-reports'}", error=True)
         return 1
+    name = converted.stem
 
-    # KiCad holds the project's files while it is open and would write its own (empty)
-    # copies back over ours, so they are swapped in only once the project is closed.
-    lockfile = folder / f"~{name}.kicad_pro.lck"
+    # KiCad holds the open project's files and would write its own copies back over ours,
+    # so the swap waits until the project is closed (KiCad deletes its lock file).
+    lockfile = folder / f"~{old}.kicad_pro.lck"
+    kicad_pid = os.getppid()
     if lockfile.exists():
-        with dialogs.Busy(f"{src.name} is converted. To finish, close {name} in KiCad: "
-                          "File → Close Project in the main KiCad window (if it asks to "
-                          "save the old schematic or board, don't).", cancellable=True) as busy:
-            deadline = time.time() + 1800
-            while lockfile.exists() and not busy.cancelled and time.time() < deadline:
-                time.sleep(0.5)
+        notice = dialogs.Notice(
+            f"✔ {src.name} is converted.\n\nTo finish, quit KiCad (File → Quit). pcbferry "
+            f"then moves {old} aside and opens {name} in KiCad.\n\n"
+            "If KiCad asks to save changes, choose not to.", "Cancel import")
+        deadline = time.time() + 3600
+        while lockfile.exists() and not notice.closed and time.time() < deadline:
+            time.sleep(0.5)
+        notice.close()
         if lockfile.exists():
-            dialogs.message(f"{name} is still open, so nothing was replaced. The converted "
+            dialogs.message(f"The import was cancelled; {old} is unchanged. The converted "
                             f"project is in:\n{staged}")
             return 0
 
-    backup = unique(folder / f"{name}-before-pcbferry")
+    # The open project's own files, and anything the converted project would overwrite
+    backup = unique(folder / f"{old}-before-pcbferry")
+    move_aside = [p for p in folder.iterdir()
+                  if (p.stem == old and p.suffix.startswith(".kicad_"))
+                  or p.name in ("sym-lib-table", "fp-lib-table")
+                  or (staged / p.name).exists()]
+    for path in move_aside:
+        backup.mkdir(exist_ok=True)
+        shutil.move(str(path), str(backup / path.name))
     for item in sorted(staged.iterdir()):
-        target = folder / item.name
-        if target.exists():
-            backup.mkdir(exist_ok=True)
-            shutil.move(str(target), str(backup / item.name))
-        shutil.move(str(item), str(target))
+        shutil.move(str(item), str(folder / item.name))
     staged.rmdir()
-    kept = f"\nThe previous files are in {backup.name}/." if backup.exists() else ""
-    dialogs.message(finish_message(
-        notes, f"{src.name} is imported into {name}.{kept}",
-        f"Open {name} again in KiCad (File → Open Recent) to see it."))
+    project = folder / f"{name}.kicad_pro"
+
+    # Quit KiCad: start it again with the new project. Only closed the project: KiCad is
+    # still running, so let the user open it there (a second KiCad would be confusing).
+    for _ in range(10):
+        if not parent_alive(kicad_pid):
+            break
+        time.sleep(0.5)
+    kept = f"\n{old}'s files are in {backup.name}/." if backup.exists() else ""
+    if not parent_alive(kicad_pid):
+        start_kicad(program, project)
+        dialogs.message(finish_message(notes, f"{src.name} is imported as {name}.{kept}",
+                                       "KiCad is opening it."))
+    elif dialogs.ask(finish_message(notes, f"{src.name} is imported as {name}.{kept}",
+                                    f"Open it from KiCad (File → Open Project…):\n{project}"),
+                     "Open in a new KiCad window", "Close"):
+        start_kicad(program, project)
     return 0
 
 
@@ -254,13 +317,15 @@ def main() -> int:
     if held is None:
         return 0
     try:
+        program = kicad_program()  # now, while the KiCad that started us is running
         project = open_project()
-        actions = ([(INTO_PROJECT[0].format(name=project.stem), *INTO_PROJECT[1:])]
+        actions = ([(INTO_PROJECT[0], INTO_PROJECT[1].format(name=project.stem), *INTO_PROJECT[2:])]
                    if project else []) + ACTIONS
-        choice = dialogs.menu("What do you want to do?", [a[0] for a in actions])
+        choice = dialogs.menu("Altium to KiCad. What do you want to do?",
+                              [(a[0], a[1]) for a in actions])
         if choice is None:
             return 0
-        _, patterns, title = actions[choice]
+        _, _, patterns, title = actions[choice]
         into = project is not None and choice == 0
 
         settings = load_settings()
@@ -274,7 +339,9 @@ def main() -> int:
         cli = get_engine()
         if cli is None:
             return 1
-        return import_into(cli, src, project) if into else convert_to_folder(cli, src, settings)
+        if into:
+            return import_into(cli, src, project, program)
+        return convert_to_folder(cli, src, settings)
     finally:
         try:
             held.unlink()

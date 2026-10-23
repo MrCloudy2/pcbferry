@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 TITLE = "pcbferry"
@@ -99,8 +100,122 @@ def choose_dir(prompt: str, start: str) -> str | None:
     return path or None
 
 
-def menu(prompt: str, items: list[str]) -> int | None:
-    """Index of the item picked, or None if cancelled."""
+def dark_mode() -> bool:
+    """Best guess at whether the desktop uses a dark theme."""
+    try:
+        if sys.platform == "win32":
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                 r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+            return winreg.QueryValueEx(key, "AppsUseLightTheme")[0] == 0
+        if sys.platform == "darwin":
+            return "Dark" in _run(["defaults", "read", "-g", "AppleInterfaceStyle"]).stdout
+        kde = Path.home() / ".config" / "kdeglobals"
+        if "KDE" in os.environ.get("XDG_CURRENT_DESKTOP", "") and kde.is_file():
+            section = ""
+            for line in kde.read_text(errors="replace").splitlines():
+                if line.startswith("["):
+                    section = line.strip()
+                elif section == "[Colors:Window]" and line.startswith("BackgroundNormal="):
+                    r, g, b = (int(v) for v in line.split("=", 1)[1].split(",")[:3])
+                    return r * 0.299 + g * 0.587 + b * 0.114 < 128
+        if shutil.which("gsettings"):
+            out = _run(["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"]).stdout
+            return "dark" in out
+    except Exception:  # noqa: BLE001 - a guess; light is fine
+        pass
+    return False
+
+
+def _tk_menu(heading: str, prompt: str, items: list[tuple[str, str]]) -> int | None:
+    """The menu as a window of cards: title + one line each, keyboard and mouse."""
+    import tkinter
+    from tkinter import font as tkfont
+
+    dark = dark_mode()
+    c = ({"bg": "#202326", "card": "#2a2e32", "hover": "#33393f", "sel": "#1d4f6e",
+          "edge": "#3d4349", "accent": "#3daee9", "text": "#eff0f1", "dim": "#a8b0b7"}
+         if dark else
+         {"bg": "#f4f5f7", "card": "#ffffff", "hover": "#eef3f8", "sel": "#dcebf7",
+          "edge": "#d5d9de", "accent": "#0b74b9", "text": "#1c1f22", "dim": "#5c6670"})
+    root = tkinter.Tk()
+    root.title(TITLE)
+    root.configure(bg=c["bg"])
+    root.resizable(False, False)
+    base = tkfont.nametofont("TkDefaultFont").actual()["family"]
+    f_head = (base, 15, "bold")
+    f_title = (base, 11, "bold")
+    f_text = (base, 10)
+
+    picked: list[int] = []
+    current = [0]
+    cards = []
+
+    def choose(i: int) -> None:
+        picked.append(i)
+        root.destroy()
+
+    def paint() -> None:
+        for i, (card, bar, labels) in enumerate(cards):
+            colour = c["sel"] if i == current[0] else c["card"]
+            card.configure(bg=colour, highlightbackground=c["accent"] if i == current[0] else c["edge"])
+            bar.configure(bg=c["accent"] if i == current[0] else colour)
+            for label in labels:
+                label.configure(bg=colour)
+
+    head = tkinter.Frame(root, bg=c["bg"])
+    head.pack(fill="x", padx=24, pady=(20, 4))
+    tkinter.Label(head, text=heading, font=f_head, fg=c["text"], bg=c["bg"]).pack(anchor="w")
+    tkinter.Label(head, text=prompt, font=f_text, fg=c["dim"], bg=c["bg"]).pack(anchor="w", pady=(2, 0))
+
+    body = tkinter.Frame(root, bg=c["bg"])
+    body.pack(fill="both", padx=24, pady=(12, 8))
+    for i, (title, text) in enumerate(items):
+        card = tkinter.Frame(body, bg=c["card"], highlightthickness=1, cursor="hand2")
+        card.pack(fill="x", pady=5)
+        bar = tkinter.Frame(card, width=4, bg=c["card"])
+        bar.pack(side="left", fill="y")
+        inner = tkinter.Frame(card, bg=c["card"])
+        inner.pack(side="left", fill="both", expand=True, padx=14, pady=10)
+        t = tkinter.Label(inner, text=title, font=f_title, fg=c["text"], bg=c["card"], anchor="w")
+        t.pack(fill="x")
+        d = tkinter.Label(inner, text=text, font=f_text, fg=c["dim"], bg=c["card"], anchor="w",
+                          justify="left", wraplength=470)
+        d.pack(fill="x", pady=(2, 0))
+        cards.append((card, bar, (card, inner, t, d)))
+        for w in (card, bar, inner, t, d):
+            w.bind("<Button-1>", lambda _e, i=i: choose(i))
+            w.bind("<Enter>", lambda _e, i=i: (current.__setitem__(0, i), paint()))
+
+    foot = tkinter.Frame(root, bg=c["bg"])
+    foot.pack(fill="x", padx=24, pady=(4, 18))
+    tkinter.Label(foot, text="↑ ↓ to pick · Enter to continue · Esc to cancel", font=(base, 9),
+                  fg=c["dim"], bg=c["bg"]).pack(side="left")
+    tkinter.Button(foot, text="Cancel", command=root.destroy, relief="flat", padx=14, pady=4,
+                   bg=c["card"], fg=c["text"], activebackground=c["hover"],
+                   activeforeground=c["text"], highlightthickness=0, bd=0).pack(side="right")
+
+    root.bind("<Up>", lambda _e: (current.__setitem__(0, max(0, current[0] - 1)), paint()))
+    root.bind("<Down>", lambda _e: (current.__setitem__(0, min(len(items) - 1, current[0] + 1)), paint()))
+    root.bind("<Return>", lambda _e: choose(current[0]))
+    root.bind("<Escape>", lambda _e: root.destroy())
+    paint()
+    root.update_idletasks()
+    w, h = max(root.winfo_reqwidth(), 560), root.winfo_reqheight()
+    root.geometry(f"{w}x{h}+{(root.winfo_screenwidth() - w) // 2}+{(root.winfo_screenheight() - h) // 3}")
+    root.attributes("-topmost", True)
+    root.focus_force()
+    root.mainloop()
+    return picked[0] if picked else None
+
+
+def menu(prompt: str, entries: list[tuple[str, str]], heading: str = "pcbferry") -> int | None:
+    """Index of the entry (title, description) picked, or None if cancelled."""
+    try:
+        return _tk_menu(heading, prompt, entries)
+    except Exception:  # noqa: BLE001 - no tkinter or no display: the plain menus below
+        pass
+    items = [title for title, _ in entries]
     if sys.platform == "win32":
         listed = ", ".join(_ps_str(i) for i in items)
         r = _ps("$f = New-Object System.Windows.Forms.Form; $f.Text = 'pcbferry'; "
@@ -195,18 +310,10 @@ def ask(text: str, yes: str, no: str) -> bool:
 
 
 class Busy:
-    """A 'working…' indicator while a long step runs (best effort; never blocks).
+    """A 'working…' indicator while a long step runs (best effort; never blocks)."""
 
-    With cancellable=True the window can be closed; `cancelled` then turns true (Windows
-    and zenity only; elsewhere it stays false).
-    """
-
-    def __init__(self, text: str, cancellable: bool = False):
-        self.text, self.cancellable, self.proc = text, cancellable, None
-
-    @property
-    def cancelled(self) -> bool:
-        return self.cancellable and self.proc is not None and self.proc.poll() is not None
+    def __init__(self, text: str):
+        self.text, self.proc = text, None
 
     def __enter__(self):
         try:
@@ -216,8 +323,7 @@ class Busy:
                      "Add-Type -AssemblyName System.Windows.Forms; "
                      "$f = New-Object System.Windows.Forms.Form; $f.Text = 'pcbferry'; "
                      "$f.Width = 420; $f.Height = 120; $f.StartPosition = 'CenterScreen'; "
-                     "$f.TopMost = $true; "
-                     f"$f.ControlBox = ${str(self.cancellable).lower()}; "
+                     "$f.TopMost = $true; $f.ControlBox = $false; "
                      "$l = New-Object System.Windows.Forms.Label; $l.Dock = 'Fill'; "
                      f"$l.TextAlign = 'MiddleCenter'; $l.Text = {_ps_str(self.text)}; "
                      "$f.Controls.Add($l); [System.Windows.Forms.Application]::Run($f)"],
@@ -227,9 +333,9 @@ class Busy:
                       f"with title {_as_str(TITLE)}"])
             elif shutil.which("zenity"):
                 self.proc = subprocess.Popen(
-                    ["zenity", "--progress", "--pulsate", "--auto-close", "--width", "460",
-                     "--title", TITLE, "--text", self.text]
-                    + ([] if self.cancellable else ["--no-cancel"]), stdin=subprocess.PIPE)
+                    ["zenity", "--progress", "--pulsate", "--no-cancel", "--auto-close",
+                     "--width", "460", "--title", TITLE, "--text", self.text],
+                    stdin=subprocess.PIPE)
             elif shutil.which("kdialog"):
                 _run(["kdialog", "--title", TITLE, "--passivepopup", self.text, "8"])
         except OSError:
@@ -249,6 +355,50 @@ class Busy:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
         return False
+
+
+class Notice:
+    """A message with one button that stays up while we wait for something; `closed`
+    turns true if the user clicks the button (or closes the window)."""
+
+    def __init__(self, text: str, button: str):
+        self.proc = None
+        try:
+            if sys.platform == "win32":
+                self.proc = subprocess.Popen(
+                    ["powershell", "-NoProfile", "-NonInteractive", "-STA", "-Command",
+                     "Add-Type -AssemblyName System.Windows.Forms; "
+                     "$f = New-Object System.Windows.Forms.Form; $f.Text = 'pcbferry'; "
+                     "$f.Width = 460; $f.Height = 200; $f.StartPosition = 'CenterScreen'; "
+                     "$f.TopMost = $true; "
+                     "$l = New-Object System.Windows.Forms.Label; $l.Dock = 'Fill'; "
+                     f"$l.Padding = 12; $l.Text = {_ps_str(text)}; "
+                     "$b = New-Object System.Windows.Forms.Button; $b.Dock = 'Bottom'; "
+                     f"$b.Text = {_ps_str(button)}; $b.Add_Click({{ $f.Close() }}); "
+                     "$f.Controls.Add($l); $f.Controls.Add($b); "
+                     "[System.Windows.Forms.Application]::Run($f)"],
+                    creationflags=NO_WINDOW)
+            elif sys.platform == "darwin":
+                self.proc = subprocess.Popen(
+                    ["osascript", "-e", f"display dialog {_as_str(text)} with title "
+                     f"{_as_str(TITLE)} buttons {{{_as_str(button)}}}"])
+            elif (tool := _linux_tool()) == "zenity":
+                self.proc = subprocess.Popen(
+                    ["zenity", "--info", "--title", TITLE, "--no-markup", "--width", "460",
+                     "--text", text, "--ok-label", button])
+            elif tool == "kdialog":
+                self.proc = subprocess.Popen(
+                    ["kdialog", "--title", TITLE, "--ok-label", button, "--msgbox", text])
+        except OSError:
+            self.proc = None
+
+    @property
+    def closed(self) -> bool:
+        return self.proc is not None and self.proc.poll() is not None
+
+    def close(self) -> None:
+        if self.proc and self.proc.poll() is None:
+            self.proc.terminate()
 
 
 def open_path(path: str) -> None:

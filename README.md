@@ -54,10 +54,10 @@ No Docker needed: install `pcbferry-kicad-plugin-VERSION.zip` from the
 asks to enable its API. The PCB and schematic editors then have a pcbferry button with
 two ways to convert:
 
-- **Into the open project.** Make an empty KiCad project where you want the design, open
-  its schematic editor, click the button and pick the `.PrjPcb`. The converted files take
-  your project's name; close the project when pcbferry asks, reopen it, and the design is
-  there. Anything the project already held is kept in `NAME-before-pcbferry/`.
+- **Here, in place of the open project.** Make an empty KiCad project where the design
+  should go, open it, click the button and pick the `.PrjPcb`. When pcbferry asks, quit
+  KiCad: it moves the empty project into `NAME-before-pcbferry/` and starts KiCad again
+  with the converted project, named as in Altium.
 - **Into a new folder.** Pick a project, a single `.SchDoc` or a single `.PcbDoc`, then a
   folder: the result goes in `NAME-kicad/` inside it.
 
