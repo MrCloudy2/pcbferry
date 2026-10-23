@@ -3,7 +3,7 @@
 # whatever environment KiCad itself runs in: AppImages point PYTHONHOME at their own
 # Python and preload their own libraries, which break other programs.
 unset PYTHONHOME PYTHONPATH LD_PRELOAD LD_LIBRARY_PATH GIO_MODULE_DIR GIO_EXTRA_MODULES \
-    GDK_PIXBUF_MODULE_FILE
+    GDK_PIXBUF_MODULE_FILE APPDIR SHARUN_DIR KICAD_STOCK_DATA_HOME
 cd "$(dirname "$0")" || exit 1
 # KiCad doesn't show a plugin's output anywhere: keep it for when something goes wrong
 case $(uname -s) in

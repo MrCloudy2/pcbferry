@@ -37,6 +37,8 @@ XML
 cat > $E/bin/kicad-cli <<'SH'
 #!/bin/sh
 d=$(dirname "$(readlink -f "$0")")
+# An AppImage KiCad that starts us exports APPDIR, which makes KiCad load its kifaces
+unset APPDIR
 FONTCONFIG_FILE=$d/../fonts/fonts.conf export FONTCONFIG_FILE
 KICAD_STOCK_DATA_HOME=$d/../share/kicad export KICAD_STOCK_DATA_HOME
 exec "$d/ld-linux-x86-64.so.2" --library-path "$d/../lib" --argv0 "$0" "$d/kicad-cli.bin" "$@"
