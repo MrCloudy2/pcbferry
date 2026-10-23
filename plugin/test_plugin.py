@@ -19,7 +19,8 @@ import threading
 import zipfile
 from pathlib import Path
 
-package, dist, projects = Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve(), sys.argv[3:]
+package, dist = Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve()
+projects = [str(Path(p).resolve()) for p in sys.argv[3:]]  # the run happens in the plugin folder
 with tempfile.TemporaryDirectory() as tmp:
     tmp = Path(tmp)
     with zipfile.ZipFile(package) as z:
