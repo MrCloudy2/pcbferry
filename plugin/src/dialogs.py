@@ -74,6 +74,84 @@ def choose_file(prompt: str, start: str, patterns: list[str]) -> str | None:
     return path or None
 
 
+def choose_dir(prompt: str, start: str) -> str | None:
+    if sys.platform == "win32":
+        r = _ps("$d = New-Object System.Windows.Forms.FolderBrowserDialog; "
+                f"$d.Description = {_ps_str(prompt)}; $d.SelectedPath = {_ps_str(start)}; "
+                "if ($d.ShowDialog() -eq 'OK') { [Console]::Out.Write($d.SelectedPath) }")
+        return r.stdout.strip() or None
+    if sys.platform == "darwin":
+        r = _run(["osascript", "-e", f"POSIX path of (choose folder with prompt {_as_str(prompt)} "
+                  f"default location (POSIX file {_as_str(start)}))"])
+        return r.stdout.strip() or None
+    tool = _linux_tool()
+    if tool == "kdialog":
+        r = _run(["kdialog", "--title", prompt, "--getexistingdirectory", start])
+        return r.stdout.strip() or None
+    if tool == "zenity":
+        r = _run(["zenity", "--file-selection", "--directory", "--title", prompt,
+                  f"--filename={start}/"])
+        return r.stdout.strip() or None
+    from tkinter import filedialog
+    root = _tk()
+    path = filedialog.askdirectory(parent=root, title=prompt, initialdir=start)
+    root.destroy()
+    return path or None
+
+
+def menu(prompt: str, items: list[str]) -> int | None:
+    """Index of the item picked, or None if cancelled."""
+    if sys.platform == "win32":
+        listed = ", ".join(_ps_str(i) for i in items)
+        r = _ps("$f = New-Object System.Windows.Forms.Form; $f.Text = 'pcbferry'; "
+                "$f.Width = 460; $f.Height = 260; $f.StartPosition = 'CenterScreen'; "
+                "$l = New-Object System.Windows.Forms.Label; $l.Dock = 'Top'; $l.Height = 30; "
+                f"$l.Text = {_ps_str(prompt)}; "
+                "$b = New-Object System.Windows.Forms.ListBox; $b.Dock = 'Fill'; "
+                f"[void]$b.Items.AddRange(@({listed})); $b.SelectedIndex = 0; "
+                "$ok = New-Object System.Windows.Forms.Button; $ok.Text = 'Continue'; "
+                "$ok.Dock = 'Bottom'; $ok.DialogResult = 'OK'; $f.AcceptButton = $ok; "
+                "$f.Controls.Add($b); $f.Controls.Add($l); $f.Controls.Add($ok); "
+                "$b.Add_DoubleClick({ $f.DialogResult = 'OK' }); "
+                "if ($f.ShowDialog() -eq 'OK') { [Console]::Out.Write($b.SelectedIndex) }")
+        return int(r.stdout) if r.stdout.strip().isdigit() else None
+    if sys.platform == "darwin":
+        listed = ", ".join(_as_str(i) for i in items)
+        r = _run(["osascript", "-e", f"choose from list {{{listed}}} with title {_as_str(TITLE)} "
+                  f"with prompt {_as_str(prompt)} default items {{{_as_str(items[0])}}}"])
+        picked = r.stdout.strip()
+        return items.index(picked) if picked in items else None
+    tool = _linux_tool()
+    if tool == "kdialog":
+        args = [x for i, item in enumerate(items) for x in (str(i), item)]
+        r = _run(["kdialog", "--title", TITLE, "--menu", prompt, *args])
+        return int(r.stdout) if r.stdout.strip().isdigit() else None
+    if tool == "zenity":
+        r = _run(["zenity", "--list", "--title", TITLE, "--text", prompt, "--hide-header",
+                  "--column", "n", "--column", "action", "--hide-column", "1",
+                  "--print-column", "1", "--width", "460", "--height", "260",
+                  *[x for i, item in enumerate(items) for x in (str(i), item)]])
+        return int(r.stdout) if r.stdout.strip().isdigit() else None
+    import tkinter
+    root = tkinter.Tk()
+    root.title(TITLE)
+    picked: list[int] = []
+    tkinter.Label(root, text=prompt, padx=12, pady=8).pack(anchor="w")
+    box = tkinter.Listbox(root, height=len(items), width=50)
+    for item in items:
+        box.insert("end", item)
+    box.selection_set(0)
+    box.pack(padx=12)
+
+    def go(*_):
+        picked.extend(box.curselection())
+        root.destroy()
+    box.bind("<Double-Button-1>", go)
+    tkinter.Button(root, text="Continue", command=go).pack(pady=8)
+    root.mainloop()
+    return picked[0] if picked else None
+
+
 def message(text: str, error: bool = False) -> None:
     if sys.platform == "win32":
         icon = "Error" if error else "Information"

@@ -1,7 +1,8 @@
-"""KiCad action: convert an Altium project with pcbferry and open the result.
+"""KiCad action: convert Altium designs with pcbferry and open the result.
 
-Asks for a .PrjPcb (or .SchDoc / .PcbDoc), converts it next to the original into
-NAME-kicad/, and offers to open the new project. The first run downloads the engine.
+Asks what to convert (a project, a schematic or a board), which file, and where to put
+it; converts it into FOLDER/NAME-kicad/ and offers to open the new project. The first
+run downloads the engine.
 """
 from __future__ import annotations
 
@@ -20,7 +21,13 @@ import dialogs  # noqa: E402
 import engine  # noqa: E402
 
 SETTINGS = engine.data_dir() / "settings.json"
-PATTERNS = ["*.PrjPcb", "*.SchDoc", "*.PcbDoc"]
+# (menu entry, file patterns, file dialog title)
+ACTIONS = [
+    ("Convert an Altium project (.PrjPcb): schematics, board, libraries and rules",
+     ["*.PrjPcb"], "Altium project to convert"),
+    ("Convert a single Altium schematic (.SchDoc)", ["*.SchDoc"], "Altium schematic to convert"),
+    ("Convert a single Altium board (.PcbDoc)", ["*.PcbDoc"], "Altium board to convert"),
+]
 
 
 def load_settings() -> dict:
@@ -38,13 +45,48 @@ def save_settings(settings: dict) -> None:
         pass
 
 
-def output_dir(src: Path) -> Path:
-    out = src.parent / f"{src.stem}-kicad"
+def output_dir(folder: Path, name: str) -> Path:
+    out = folder / f"{name}-kicad"
     n = 2
     while out.exists():
-        out = src.parent / f"{src.stem}-kicad-{n}"
+        out = folder / f"{name}-kicad-{n}"
         n += 1
     return out
+
+
+# What pcbferry's library checks mean, for people
+LIBRARY_ISSUES = {
+    "lib_footprint_mismatch": "footprint(s) differ from their library copy; the board keeps "
+                              "its own version",
+    "lib_footprint_issues": "footprint(s) not found in a library",
+    "footprint_link_issues": "symbol(s) link to a footprint that isn't in a library",
+    "lib_symbol_issues": "symbol(s) not found in a library",
+    "lib_symbol_mismatch": "symbol(s) differ from their library copy",
+}
+
+
+def report(out: Path) -> list[str]:
+    """Things worth a look, from pcbferry's summary.json, in plain words."""
+    try:
+        summary = json.loads((out / "import-reports" / "summary.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ["No summary was written; see import-reports/pcbferry.log."]
+    notes = []
+    for step in summary.get("steps", []):
+        if not step.get("ok"):
+            notes.append(f"The {step['step']} step failed.")
+        missing = [e for e in step.get("errors", []) if e.startswith("File not found")]
+        if missing:
+            names = ", ".join(e.replace("\\", "/").rsplit("/", 1)[-1].rstrip(".") for e in missing)
+            notes.append(f"{len(missing)} linked file(s) weren't found (they're on the original "
+                         f"PC): {names}")
+        for kind, n in step.get("library_issues", {}).items():
+            if n:
+                notes.append(f"{n} {LIBRARY_ISSUES.get(kind, kind)}")
+    if summary.get("options", {}).get("custom_rules") and not any(
+            st["step"] == "custom rules" and st.get("ok") for st in summary.get("steps", [])):
+        notes.append("Altium's design rules couldn't be read.")
+    return notes
 
 
 def get_engine() -> Path | None:
@@ -105,32 +147,42 @@ def main() -> int:
     if held is None:
         return 0
     try:
+        choice = dialogs.menu("What do you want to do?", [a[0] for a in ACTIONS])
+        if choice is None:
+            return 0
+        _, patterns, title = ACTIONS[choice]
+
         settings = load_settings()
-        start = settings.get("last_dir") or str(Path.home())
-        chosen = dialogs.choose_file("Altium project to convert", start, PATTERNS)
+        chosen = dialogs.choose_file(title, settings.get("last_dir") or str(Path.home()), patterns)
         if not chosen:
             return 0
         src = Path(chosen)
-        settings["last_dir"] = str(src.parent)
+        dest = dialogs.choose_dir(f"Where to put the KiCad project (a folder {src.stem}-kicad "
+                                  "is made inside)", settings.get("last_out_dir") or str(src.parent))
+        if not dest:
+            return 0
+        settings.update(last_dir=str(src.parent), last_out_dir=dest)
         save_settings(settings)
 
         cli = get_engine()
         if cli is None:
             return 1
-        out = output_dir(src)
+        out = output_dir(Path(dest), src.stem)
         with dialogs.Busy(f"Converting {src.name}…"):
-            ok, log = convert(cli, src, out)
+            convert(cli, src, out)
 
         project = next(out.glob("*.kicad_pro"), None)
-        last = [l for l in log.splitlines() if l.startswith("pcbferry:")][-3:]
+        notes = report(out)
         if project is None:
-            dialogs.message("The conversion failed.\n\n" + "\n".join(last)
+            dialogs.message(f"{src.name} couldn't be converted.\n\n" + "\n".join(notes)
                             + f"\n\nDetails: {out / 'import-reports'}", error=True)
             return 1
-        verdict = "Converted" if ok else "Converted, with problems"
-        if dialogs.ask(f"{verdict}:\n{project}\n\n" + "\n".join(last)
-                       + "\n\nReports are in import-reports/. Open the project in KiCad?",
-                       "Open", "Close"):
+        text = f"{src.name} is converted:\n{project}\n\n"
+        if notes:
+            text += "Worth a look:\n" + "\n".join(f"• {n}" for n in notes) + "\n\n"
+        text += ("Run DRC in KiCad before manufacturing: Altium and KiCad check different "
+                 "things. Reports are in import-reports/.\n\nOpen the project in KiCad?")
+        if dialogs.ask(text, "Open", "Close"):
             dialogs.open_path(str(project))
         return 0
     finally:
