@@ -78,7 +78,7 @@ def main() -> None:
         z.writestr("metadata.json", json.dumps(metadata, indent=2))
         z.write(HERE / "src" / "icons" / "pcbferry-64.png", "resources/icon.png")
         for f in sorted((HERE / "src").rglob("*")):
-            if f.is_file() and "__pycache__" not in f.parts:
+            if f.is_file() and "__pycache__" not in f.parts:  # (keeps the exec bit)
                 z.write(f, "plugins/" + f.relative_to(HERE / "src").as_posix())
         for name in ("pcbferry", "pcbferry_dru.py", "LICENSE"):
             z.write(REPO / name, f"plugins/{name}")

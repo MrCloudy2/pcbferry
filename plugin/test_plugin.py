@@ -3,9 +3,10 @@
 
     plugin/test_plugin.py dist/pcbferry-kicad-plugin-X.zip DIST_DIR PROJECT.PrjPcb [MORE.PrjPcb ...]
 
-Unpacks the package, makes a venv from its requirements.txt (as KiCad does), serves
-DIST_DIR over local HTTP so the plugin downloads the engine there instead of from
-GitHub, converts each project and checks its summary.
+Unpacks the package, runs it with plain Python as KiCad's exec runtime does (it needs
+nothing installed: olefile is bundled), serves DIST_DIR over local HTTP so the plugin
+downloads the engine there instead of from GitHub, converts each project and checks
+its summary.
 """
 import functools
 import http.server
@@ -21,11 +22,13 @@ from pathlib import Path
 package, dist, projects = Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve(), sys.argv[3:]
 with tempfile.TemporaryDirectory() as tmp:
     tmp = Path(tmp)
-    zipfile.ZipFile(package).extractall(tmp)
+    with zipfile.ZipFile(package) as z:
+        z.extractall(tmp)
+        entry = json.loads(z.read("plugins/plugin.json"))["actions"][0]["entrypoint"]
+        mode = z.getinfo(f"plugins/{entry}").external_attr >> 16
+        assert mode & 0o111, f"{entry} is not executable in the package"
     plugin = tmp / "plugins"
-    subprocess.run([sys.executable, "-m", "venv", tmp / "venv"], check=True)
-    py = tmp / "venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    subprocess.run([py, "-m", "pip", "-q", "install", "-r", plugin / "requirements.txt"], check=True)
+    py = sys.executable
 
     server = http.server.ThreadingHTTPServer(
         ("127.0.0.1", 0), functools.partial(http.server.SimpleHTTPRequestHandler, directory=dist))
@@ -37,7 +40,7 @@ with tempfile.TemporaryDirectory() as tmp:
     script = """
 import json, sys
 from pathlib import Path
-import engine, import_altium
+import engine, import_altium, olefile
 cli = engine.installed() or engine.install()
 failed = 0
 for src in map(Path, sys.argv[1:]):
