@@ -25,8 +25,10 @@ with tempfile.TemporaryDirectory() as tmp:
     with zipfile.ZipFile(package) as z:
         z.extractall(tmp)
         action = json.loads(z.read("plugins/plugin.json"))["actions"][0]
-        # KiCad runs /bin/sh -c '... pcbferry-import.sh' (no exec bit needed)
-        assert action["entrypoint"] == "/bin/sh" and "pcbferry-import.sh" in action["args"][-1]
+        # KiCad runs sh -c '... pcbferry-import.sh' (no exec bit needed)
+        # KiCad skips absolute entrypoints, so it's /bin/sh reached through ../
+        assert action["entrypoint"].startswith("../") and action["entrypoint"].endswith("/bin/sh")
+        assert "pcbferry-import.sh" in action["args"][-1]
         assert "plugins/pcbferry-import.sh" in z.namelist()
     plugin = tmp / "plugins"
     py = sys.executable
