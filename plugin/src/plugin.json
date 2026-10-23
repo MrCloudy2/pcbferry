@@ -16,7 +16,7 @@
         "pcb",
         "schematic"
       ],
-      "entrypoint": "pcbferry-import.sh",
+      "entrypoint": "/bin/sh",
       "icons-light": [
         "icons/pcbferry-24.png",
         "icons/pcbferry-48.png"
@@ -24,6 +24,10 @@
       "icons-dark": [
         "icons/pcbferry-24.png",
         "icons/pcbferry-48.png"
+      ],
+      "args": [
+        "-c",
+        "exec /bin/sh \"${KICAD10_3RD_PARTY:-$HOME/.local/share/kicad/10.0/3rdparty}/plugins/io_github_mrcloudy2_pcbferry/pcbferry-import.sh\""
       ]
     }
   ]
