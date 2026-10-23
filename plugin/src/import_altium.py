@@ -142,6 +142,9 @@ def lock():
 
 def convert(cli: Path, src: Path, out: Path) -> tuple[bool, str]:
     env = dict(os.environ, KICAD_CLI=str(cli), PYTHONIOENCODING="utf-8")
+    # From an AppImage KiCad: APPDIR would make the engine load the AppImage's kifaces
+    for var in ("APPDIR", "SHARUN_DIR", "KICAD_STOCK_DATA_HOME"):
+        env.pop(var, None)
     cmd = [sys.executable, str(HERE / "pcbferry"), "--check", "--fill-zones", str(src), str(out)]
     proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
                           env=env, creationflags=dialogs.NO_WINDOW)
