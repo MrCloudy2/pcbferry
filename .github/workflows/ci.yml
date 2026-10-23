@@ -26,9 +26,9 @@ jobs:
 
       - name: Wrapper scripts
         run: |
-          python3 -m py_compile pcbferry pcbferry_dru.py pcbferry-container
+          python3 -m py_compile pcbferry pcbferry_dru.py pcbferry-container plugin/*.py plugin/src/*.py
           python3 pcbferry --help > /dev/null
-          shellcheck build.sh
+          shellcheck build.sh plugin/engine/*.sh
 
       - name: Patches apply to the pinned KiCad
         run: |
@@ -104,6 +104,28 @@ jobs:
           EOF
           done
 
+      - name: Linux engine and KiCad plugin
+        run: |
+          set -euo pipefail
+          version=$(python3 pcbferry --version | awk '{print $2}')
+          if [[ $GITHUB_REF == refs/tags/v* ]]; then version=${GITHUB_REF_NAME#v}; fi
+          mkdir -p dist
+          PCBFERRY_ENGINE=docker plugin/engine/bundle-linux.sh pcbferry:ci dist/pcbferry-engine-linux-x86_64.tar.xz
+          python3 plugin/package.py --version "$version" --out dist \
+            --engine linux-x86_64=dist/pcbferry-engine-linux-x86_64.tar.xz
+          # Through the plugin's own code, on an older distribution than the image's
+          docker run --rm -v "$PWD:/w" -w /w python:3.11-slim python3 plugin/test_plugin.py \
+            "dist/pcbferry-kicad-plugin-$version.zip" dist \
+            corpus/attiny85/hardware/ATTiny85.PrjPcb corpus/kasli/Kasli.PrjPCB
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kicad-plugin
+          path: |
+            dist/pcbferry-kicad-plugin-*.zip
+            dist/pcbferry-engine-*.tar.xz
+          retention-days: 7
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -135,4 +157,6 @@ jobs:
         run: |
           tar -C source -czf pcbferry-patches.tar.gz patches SOURCE.txt
           gh release create "$GITHUB_REF_NAME" --generate-notes \
-            source/kicad-*-pcbferry-source.tar.xz pcbferry-patches.tar.gz
+            source/kicad-*-pcbferry-source.tar.xz pcbferry-patches.tar.gz \
+            dist/pcbferry-kicad-plugin-*.zip dist/pcbferry-engine-*.tar.xz \
+            dist/packages.json dist/repository.json
