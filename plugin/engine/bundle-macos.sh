@@ -15,10 +15,19 @@ app=$E/KiCad.app/Contents
 mkdir -p "$app/MacOS" "$app/PlugIns" "$app/Frameworks" "$E/bin" \
          "$E/share/kicad/template" "$E/share/kicad/schemas" "$E/share/doc/pcbferry"
 
-cp "$build/kicad/kicad-cli" "$app/MacOS/"
-cp "$build"/eeschema/_eeschema.kiface "$build"/pcbnew/_pcbnew.kiface "$build"/cvpcb/_cvpcb.kiface "$app/PlugIns/"
-find "$build" -name '*.dylib' \( -path '*/common/*' -o -path '*/api/*' -o -path '*/3d-viewer/*' \) \
-    -exec cp {} "$app/Frameworks/" \;
+# On macOS the build already lays things out in app bundles: find them wherever they are
+one() { find "$build" -name "$1" -type f -not -path '*/CMakeFiles/*' | head -1; }
+cli=$(one kicad-cli)
+[ -n "$cli" ] || { echo "kicad-cli not found in $build" >&2; exit 1; }
+cp "$cli" "$app/MacOS/"
+for k in _eeschema _pcbnew _cvpcb; do
+    f=$(one "$k.kiface")
+    [ -n "$f" ] || { echo "$k.kiface not found in $build" >&2; exit 1; }
+    cp "$f" "$app/PlugIns/"
+done
+find "$build" -type f \( -name 'libkicommon*.dylib' -o -name 'libkigal*.dylib' -o -name 'libkiapi*.dylib' \
+    -o -name 'libkicad_3dsg*.dylib' \) -not -path '*/CMakeFiles/*' -exec cp {} "$app/Frameworks/" \;
+ls -la "$app/MacOS" "$app/PlugIns" "$app/Frameworks"
 
 # Copy the libraries KiCad's own outputs load and rewrite every reference to them
 args=()
