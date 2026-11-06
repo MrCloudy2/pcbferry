@@ -166,7 +166,8 @@ def _tk_menu(heading: str, prompt: str, items: list[tuple[str, str]]) -> int | N
     head = tkinter.Frame(root, bg=c["bg"])
     head.pack(fill="x", padx=24, pady=(20, 4))
     tkinter.Label(head, text=heading, font=f_head, fg=c["text"], bg=c["bg"]).pack(anchor="w")
-    tkinter.Label(head, text=prompt, font=f_text, fg=c["dim"], bg=c["bg"]).pack(anchor="w", pady=(2, 0))
+    tkinter.Label(head, text=prompt, font=f_text, fg=c["dim"], bg=c["bg"], justify="left",
+                  wraplength=510).pack(anchor="w", pady=(2, 0))
 
     body = tkinter.Frame(root, bg=c["bg"])
     body.pack(fill="both", padx=24, pady=(12, 8))
