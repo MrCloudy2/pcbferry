@@ -531,6 +531,13 @@ def translate(rules: list[dict], ctx: Context, carried, no_custom_reason=lambda 
                 entry["status"] = "imported" if entry["carried"] else "untranslatable"
             entry["reason"] = str(why)
         results.append(entry)
+    # The importer gives vias a land the size of their hole on Altium planes (Altium draws
+    # none there and clears the plane from the hole); Altium checks no annular ring there.
+    for plane in sorted({c for name, c in ctx.layers.items() if "plane" in name}):
+        blocks.append(f"(rule \"Altium plane {plane}: vias have no land\"\n"
+                      f"  (layer \"{plane}\")\n"
+                      f"  (constraint annular_width (min 0mm))\n"
+                      f"  (condition \"A.Type == 'Via'\"))")
     header = ("(version 1)\n"
               "# Translated from the Altium design rules. Lower Altium precedence first:\n"
               "# KiCad applies the last matching rule.\n")
