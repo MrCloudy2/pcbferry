@@ -6,7 +6,7 @@
 (`.PrjPcb`) into a KiCad 10 project: schematics, board, libraries and design
 rules, with every symbol and footprint linked to a library.
 
-It is KiCad's own Altium importer with [26 fixes](PATCHES.md), packaged as a
+It is KiCad's own Altium importer with [27 fixes](PATCHES.md), packaged as a
 container, so it runs the same on Linux, macOS and Windows. The result is a plain
 KiCad 10 project.
 
