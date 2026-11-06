@@ -1,0 +1,30 @@
+{
+  "$schema": "https://go.kicad.org/api/schemas/v1",
+  "identifier": "io.github.mrcloudy2.pcbferry",
+  "name": "pcbferry",
+  "description": "Convert Altium Designer projects to KiCad",
+  "runtime": {
+    "type": "exec"
+  },
+  "actions": [
+    {
+      "identifier": "import-altium",
+      "name": "Import Altium project",
+      "description": "Convert an Altium project (.PrjPcb) to a KiCad project with pcbferry",
+      "show-button": true,
+      "scopes": [
+        "pcb",
+        "schematic"
+      ],
+      "entrypoint": "pcbferry-import.sh",
+      "icons-light": [
+        "icons/pcbferry-24.png",
+        "icons/pcbferry-48.png"
+      ],
+      "icons-dark": [
+        "icons/pcbferry-24.png",
+        "icons/pcbferry-48.png"
+      ]
+    }
+  ]
+}
