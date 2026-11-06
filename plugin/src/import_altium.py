@@ -166,8 +166,9 @@ def choose_boards(src: Path, allow_all: bool) -> list[Path | None] | None:
     if allow_all:
         entries.append((f"All {len(boards)} boards",
                         "One KiCad project per board, each with the schematics."))
-    choice = dialogs.menu(f"{src.name} has {len(boards)} boards. A KiCad project holds one; "
-                          "which do you want?", entries, heading="Choose a board")
+    choice = dialogs.menu(f"{src.name} has {len(boards)} boards, but KiCad currently has no "
+                          "support for several boards in one project. Please choose which "
+                          "board you want to keep.", entries, heading="Choose a board")
     if choice is None:
         return None
     return list(boards) if choice == len(boards) else [boards[choice]]
