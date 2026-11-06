@@ -60,6 +60,7 @@ jobs:
           echo "python: $py $py_inc $py_lib"
           cmake -Wno-dev -G Ninja -S kicad -B build \
             -DPYTHON_EXECUTABLE="$py" -DPYTHON_INCLUDE_DIR="$py_inc" -DPYTHON_LIBRARY="$py_lib" \
+            -DPYTHON_FRAMEWORK="$($py -c 'import sysconfig; print(sysconfig.get_config_var("PYTHONFRAMEWORKPREFIX"))')/Python.framework" \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_PREFIX_PATH="$brew_prefix;$(brew --prefix wxwidgets@3.2);$(brew --prefix opencascade)" \
