@@ -12,13 +12,14 @@ E=$(mktemp -d)/pcbferry-engine
 mkdir -p "$E/bin" "$E/share/kicad/template" "$E/share/kicad/schemas" "$E/share/doc/pcbferry"
 
 cp "$build/kicad/kicad-cli.exe" "$E/bin/"
-cp "$build"/eeschema/_eeschema.kiface "$build"/pcbnew/_pcbnew.kiface "$build"/cvpcb/_cvpcb.kiface "$E/bin/"
+# (kifaces are DLLs on Windows: _eeschema.dll, ...)
+cp "$build"/eeschema/_eeschema.dll "$build"/pcbnew/_pcbnew.dll "$build"/cvpcb/_cvpcb.dll "$E/bin/"
 find "$build" -name '*.dll' \( -path '*/common/*' -o -path '*/api/*' -o -path '*/3d-viewer/*' \) \
     -exec cp {} "$E/bin/" \;
 
 # Every MSYS2 DLL the program and kifaces load, transitively (Windows' own stay out)
 for _ in 1 2 3 4; do
-    for f in "$E"/bin/*.exe "$E"/bin/*.kiface "$E"/bin/*.dll; do
+    for f in "$E"/bin/*.exe "$E"/bin/*.dll; do
         ldd "$f" 2>/dev/null | awk '/=> \/ucrt64\//{print $3}'
     done | sort -u | while read -r dll; do
         [ -e "$E/bin/$(basename "$dll")" ] || cp "$dll" "$E/bin/"
