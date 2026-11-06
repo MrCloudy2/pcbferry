@@ -140,12 +140,48 @@ def lock():
     return path
 
 
-def convert(cli: Path, src: Path, out: Path) -> tuple[bool, str]:
+def project_boards(src: Path) -> list[Path]:
+    """The .PcbDocs a .PrjPcb lists, read with pcbferry's own project reader."""
+    if src.suffix.lower() != ".prjpcb":
+        return []
+    import importlib.machinery
+    import importlib.util
+    loader = importlib.machinery.SourceFileLoader("pcbferry_cli", str(HERE / "pcbferry"))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    cli = importlib.util.module_from_spec(spec)
+    loader.exec_module(cli)
+    return [d for d in cli.project_documents(src) if d.suffix.lower() == ".pcbdoc"]
+
+
+def choose_boards(src: Path, allow_all: bool) -> list[Path | None] | None:
+    """Which board(s) to convert: [None] when there's no choice, None if cancelled.
+
+    A KiCad project holds one board, so a project with several becomes one KiCad
+    project per board (the schematics are converted with each)."""
+    boards = project_boards(src)
+    if len(boards) < 2:
+        return [None]
+    entries = [(b.stem, "next to the project" if b.parent == src.parent else f"in {b.parent}")
+               for b in boards]
+    if allow_all:
+        entries.append((f"All {len(boards)} boards",
+                        "One KiCad project per board, each with the schematics."))
+    choice = dialogs.menu(f"{src.name} has {len(boards)} boards. A KiCad project holds one; "
+                          "which do you want?", entries, heading="Choose a board")
+    if choice is None:
+        return None
+    return list(boards) if choice == len(boards) else [boards[choice]]
+
+
+def convert(cli: Path, src: Path, out: Path, board: Path | None = None,
+            name: str | None = None) -> tuple[bool, str]:
     env = dict(os.environ, KICAD_CLI=str(cli), PYTHONIOENCODING="utf-8")
     # From an AppImage KiCad: APPDIR would make the engine load the AppImage's kifaces
     for var in ("APPDIR", "SHARUN_DIR", "KICAD_STOCK_DATA_HOME"):
         env.pop(var, None)
-    cmd = [sys.executable, str(HERE / "pcbferry"), "--check", "--fill-zones", str(src), str(out)]
+    cmd = [sys.executable, str(HERE / "pcbferry"), "--check", "--fill-zones",
+           *(["--board", str(board)] if board else []), *(["--name", name] if name else []),
+           str(src), str(out)]
     proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
                           env=env, creationflags=dialogs.NO_WINDOW)
     log = proc.stdout + proc.stderr
@@ -228,13 +264,17 @@ def parent_alive(pid: int) -> bool:
 
 def import_into(cli: Path, src: Path, current: Path, program: list[str] | None) -> int:
     old, folder = current.stem, current.parent
+    picked = choose_boards(src, allow_all=False)
+    if picked is None:
+        return 0
+    board = picked[0]
     if has_design(current) and not dialogs.ask(
             f"{old} already has a schematic or board. The import moves it into "
             f"{old}-before-pcbferry/.\n\nImport anyway?", "Import", "Cancel"):
         return 0
     staged = unique(folder / f"{src.stem}-pcbferry-import")
     with dialogs.Busy(f"Converting {src.name}…"):
-        convert(cli, src, staged)
+        convert(cli, src, staged, board)
     notes = report(staged)
     converted = next(staged.glob("*.kicad_pro"), None)
     if converted is None:
@@ -294,25 +334,50 @@ def import_into(cli: Path, src: Path, current: Path, program: list[str] | None) 
 
 
 def convert_to_folder(cli: Path, src: Path, settings: dict) -> int:
-    dest = dialogs.choose_dir(f"Where to put the KiCad project (a folder {src.stem}-kicad "
-                              "is made inside)", settings.get("last_out_dir") or str(src.parent))
+    picked = choose_boards(src, allow_all=True)
+    if picked is None:
+        return 0
+    several = len(picked) > 1
+    dest = dialogs.choose_dir(
+        f"Where to put the KiCad project{'s' if several else ''} (a folder per project is "
+        "made inside)", settings.get("last_out_dir") or str(src.parent))
     if not dest:
         return 0
     settings["last_out_dir"] = dest
     save_settings(settings)
-    out = output_dir(Path(dest), src.stem)
-    with dialogs.Busy(f"Converting {src.name}…"):
-        convert(cli, src, out)
-    project = next(out.glob("*.kicad_pro"), None)
-    notes = report(out)
-    if project is None:
-        dialogs.message(f"{src.name} couldn't be converted.\n\n" + "\n".join(notes)
+
+    done, failed = [], []
+    for board in picked:
+        name = f"{src.stem}-{board.stem}" if several else None
+        out = output_dir(Path(dest), name or src.stem)
+        label = f"{src.name} ({board.name})" if several else src.name
+        with dialogs.Busy(f"Converting {label}…"):
+            convert(cli, src, out, board, name)
+        project = next(out.glob("*.kicad_pro"), None)
+        (done if project else failed).append((label, project or out, report(out)))
+
+    if not done:
+        label, out, notes = failed[0]
+        dialogs.message(f"{label} couldn't be converted.\n\n" + "\n".join(notes)
                         + f"\n\nDetails: {out / 'import-reports'}", error=True)
         return 1
-    if dialogs.ask(finish_message(notes, f"{src.name} is converted:\n{project}",
-                                  "Open the project in KiCad?"), "Open", "Close"):
-        dialogs.open_path(str(project))
-    return 0
+    if not several:
+        label, project, notes = done[0]
+        if dialogs.ask(finish_message(notes, f"{label} is converted:\n{project}",
+                                      "Open the project in KiCad?"), "Open", "Close"):
+            dialogs.open_path(str(project))
+        return 0
+    lines = []
+    for label, project, notes in done:
+        lines.append(f"✔ {project.stem}: {project.parent.name}/")
+        lines += [f"    • {n}" for n in notes]
+    for label, out, _ in failed:
+        lines.append(f"✘ {label} failed; see {out.name}/import-reports/")
+    if dialogs.ask(finish_message([], f"{len(done)} of {len(picked)} boards converted into "
+                                  f"{dest}:\n\n" + "\n".join(lines), "Open the folder?"),
+                   "Open folder", "Close"):
+        dialogs.open_path(dest)
+    return 0 if not failed else 1
 
 
 def main() -> int:
