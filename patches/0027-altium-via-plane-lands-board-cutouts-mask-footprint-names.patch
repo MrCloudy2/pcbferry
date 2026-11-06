@@ -1,0 +1,378 @@
+diff --git a/eeschema/eeschema_jobs_handler.cpp b/eeschema/eeschema_jobs_handler.cpp
+index 94e8fdbf..57634671 100644
+--- a/eeschema/eeschema_jobs_handler.cpp
++++ b/eeschema/eeschema_jobs_handler.cpp
+@@ -2115,19 +2115,25 @@ int EESCHEMA_JOBS_HANDLER::JobSchImport( JOB* aJob )
+                     mine.Parse( symbol->GetField( FIELD_T::FOOTPRINT )->GetText(), true );
+                     theirs.Parse( it->second, true );
+ 
+-                    wxString theirName = theirs.GetUniStringLibItemName();
+-                    wxString myName = mine.GetUniStringLibItemName();
++                    wxString theirName = UnescapeString( theirs.GetUniStringLibItemName() );
++                    wxString myName = UnescapeString( mine.GetUniStringLibItemName() );
+                     wxRegEx  variant( wxS( " \\([0-9]+\\)$" ) );
+ 
+                     // Both sides: a footprint can be named "RESC2012M (0805)" in its own right
+                     variant.ReplaceFirst( &theirName, wxEmptyString );
+                     variant.ReplaceFirst( &myName, wxEmptyString );
+ 
+-                    // The board import may have replaced '/' in footprint names
++                    // The board import may have replaced '/' in footprint names, and replaces
++                    // characters KiCad doesn't allow (LIB_ID::FixIllegalChars). Altium compares
++                    // names without case: one part can be "Firewire6-RA" on a sheet and
++                    // "FIREWIRE6-RA" on the board.
+                     bool same = theirName.length() == myName.length();
+ 
+                     for( size_t i = 0; same && i < myName.length(); ++i )
+-                        same = theirName[i] == myName[i] || myName[i] == '/';
++                    {
++                        same = wxTolower( theirName[i] ) == wxTolower( myName[i] ) || myName[i] == '/'
++                               || ( theirName[i] == '_' && wxString( wxS( "\"<>\\" ) ).Contains( myName[i] ) );
++                    }
+ 
+                     if( same )
+                         symbol->GetField( FIELD_T::FOOTPRINT )->SetText( it->second );
+diff --git a/pcbnew/pcb_io/altium/altium_pcb.cpp b/pcbnew/pcb_io/altium/altium_pcb.cpp
+index e80dcfe8..82c07de0 100644
+--- a/pcbnew/pcb_io/altium/altium_pcb.cpp
++++ b/pcbnew/pcb_io/altium/altium_pcb.cpp
+@@ -485,6 +485,47 @@ ALTIUM_PCB::~ALTIUM_PCB()
+ {
+ }
+ 
++// Internal layers of the board that are Altium planes (imported as power layers)
++static LSET altiumPlaneLayers( const BOARD* aBoard )
++{
++    LSET planes;
++
++    for( PCB_LAYER_ID layer : LSET( aBoard->GetEnabledLayers() & LSET::InternalCuMask() ).Seq() )
++    {
++        if( aBoard->GetLayerType( layer ) == LT_POWER )
++            planes.set( layer );
++    }
++
++    return planes;
++}
++
++
++// Give a padstack its own shape per copper layer, with a land exactly the size of the hole on
++// the plane layers: no copper ring, and KiCad's clearances measured from the hole, as Altium's.
++static void holeSizedLandsOnPlanes( PADSTACK& aPadstack, const LSET& aLayers, const LSET& aPlanes,
++                                    const VECTOR2I& aDrill, bool aOblong )
++{
++    std::vector<std::pair<PCB_LAYER_ID, PADSTACK::COPPER_LAYER_PROPS>> props;
++
++    for( PCB_LAYER_ID layer : LSET( aLayers & LSET::AllCuMask() ).Seq() )
++        props.emplace_back( layer, aPadstack.CopperLayer( aPadstack.EffectiveLayerFor( layer ) ) );
++
++    aPadstack.SetMode( PADSTACK::MODE::CUSTOM );
++
++    for( const auto& [layer, layerProps] : props )
++    {
++        aPadstack.CopperLayer( layer ) = layerProps;
++
++        if( aPlanes.test( layer ) )
++        {
++            aPadstack.SetShape( aOblong ? PAD_SHAPE::OVAL : PAD_SHAPE::CIRCLE, layer );
++            aPadstack.SetSize( aOblong ? aDrill : VECTOR2I( aDrill.x, aDrill.x ), layer );
++            aPadstack.Offset( layer ) = VECTOR2I( 0, 0 );
++        }
++    }
++}
++
++
+ void ALTIUM_PCB::checkpoint()
+ {
+     const unsigned PROGRESS_DELTA = 250;
+@@ -746,6 +787,7 @@ void ALTIUM_PCB::Parse( const ALTIUM_PCB_COMPOUND_FILE&              altiumPcbFi
+     }
+ 
+     HelperSnapTrackEnds();
++    HelperApplyBoardCutouts();
+ 
+     // Rebuild interactive length-tuning meanders from the SmartUnions definitions now that all
+     // copper that the unions reference has been created and added to the board.
+@@ -799,15 +841,10 @@ void ALTIUM_PCB::Parse( const ALTIUM_PCB_COMPOUND_FILE&              altiumPcbFi
+ 
+     // Altium draws no lands on internal planes and clears a plane from the hole; KiCad clears it
+     // from the land, which cuts planes apart between tight-pitch pins (Kasli: connector GND pins
+-    // cut off). Plated pads crossing a plane keep lands only where something connects, as vias
+-    // on planes do (see ParseVias6Data).
+-    LSET planeLayers;
+-
+-    for( PCB_LAYER_ID layer : LSET( m_board->GetEnabledLayers() & LSET::InternalCuMask() ).Seq() )
+-    {
+-        if( m_board->GetLayerType( layer ) == LT_POWER )
+-            planeLayers.set( layer );
+-    }
++    // cut off). Plated pads crossing a plane keep lands only where something connects. (Vias get
++    // a land the size of their hole on planes instead, see ParseVias6Data; a pad cannot: KiCad
++    // plots the mask of a pad with per-layer shapes without its expansion.)
++    LSET planeLayers = altiumPlaneLayers( m_board );
+ 
+     if( planeLayers.any() )
+     {
+@@ -1464,7 +1501,8 @@ void ALTIUM_PCB::ParseBoard6Data( const ALTIUM_PCB_COMPOUND_FILE&     aAltiumPcb
+     }
+ 
+     HelperBuildPadstackLayerIndex();
+-    HelperCreateBoardOutline( elem.board_vertices );
++    HelperShapeLineChainFromAltiumVertices( m_boardOutline, elem.board_vertices );
++    HelperCreateBoardOutline( elem.board_vertices, &m_boardOutlineShapes );
+     m_board->GetDesignSettings().SetBoardThickness( stackup.BuildBoardThicknessFromStackup() );
+     designSettings.m_HasStackup = true;
+ }
+@@ -1804,41 +1842,105 @@ void ALTIUM_PCB::HelperFillMechanicalLayerAssignments( const std::vector<ABOARD6
+ }
+ 
+ 
+-void ALTIUM_PCB::HelperCreateBoardOutline( const std::vector<ALTIUM_VERTICE>& aVertices )
++void ALTIUM_PCB::HelperCreateBoardOutline( const std::vector<ALTIUM_VERTICE>& aVertices,
++                                           std::vector<PCB_SHAPE*>* aCreated )
+ {
+     SHAPE_LINE_CHAIN lineChain;
+     HelperShapeLineChainFromAltiumVertices( lineChain, aVertices );
++    HelperCreateEdgeCutsFromChain( lineChain, aCreated );
++}
++
+ 
++void ALTIUM_PCB::HelperCreateEdgeCutsFromChain( const SHAPE_LINE_CHAIN& aChain,
++                                                std::vector<PCB_SHAPE*>* aCreated )
++{
+     STROKE_PARAMS stroke( m_board->GetDesignSettings().GetLineThickness( Edge_Cuts ),
+                           LINE_STYLE::SOLID );
+ 
+-    for( int i = 0; i <= lineChain.PointCount() && i != -1; i = lineChain.NextShape( i ) )
++    for( int i = 0; i <= aChain.PointCount() && i != -1; i = aChain.NextShape( i ) )
+     {
+-        if( lineChain.IsArcStart( i ) )
+-        {
+-            const SHAPE_ARC& currentArc = lineChain.Arc( lineChain.ArcIndex( i ) );
++        std::unique_ptr<PCB_SHAPE> shape;
+ 
+-            std::unique_ptr<PCB_SHAPE> shape = std::make_unique<PCB_SHAPE>( m_board, SHAPE_T::ARC );
++        if( aChain.IsArcStart( i ) )
++        {
++            const SHAPE_ARC& currentArc = aChain.Arc( aChain.ArcIndex( i ) );
+ 
+-            shape->SetStroke( stroke );
+-            shape->SetLayer( Edge_Cuts );
++            shape = std::make_unique<PCB_SHAPE>( m_board, SHAPE_T::ARC );
+             shape->SetArcGeometry( currentArc.GetP0(), currentArc.GetArcMid(), currentArc.GetP1() );
+-
+-            m_board->Add( shape.release(), ADD_MODE::APPEND );
+         }
+         else
+         {
+-            const SEG& seg = lineChain.Segment( i );
+-
+-            std::unique_ptr<PCB_SHAPE> shape = std::make_unique<PCB_SHAPE>( m_board, SHAPE_T::SEGMENT );
++            const SEG& seg = aChain.Segment( i );
+ 
+-            shape->SetStroke( stroke );
+-            shape->SetLayer( Edge_Cuts );
++            shape = std::make_unique<PCB_SHAPE>( m_board, SHAPE_T::SEGMENT );
+             shape->SetStart( seg.A );
+             shape->SetEnd( seg.B );
+-
+-            m_board->Add( shape.release(), ADD_MODE::APPEND );
+         }
++
++        shape->SetStroke( stroke );
++        shape->SetLayer( Edge_Cuts );
++
++        if( aCreated )
++            aCreated->push_back( shape.get() );
++
++        m_board->Add( shape.release(), ADD_MODE::APPEND );
++    }
++}
++
++
++void ALTIUM_PCB::HelperApplyBoardCutouts()
++{
++    // Altium removes a board cutout from the board shape. One wholly inside the board is a hole
++    // in KiCad's outline; one that crosses the board edge (or lies outside it) would leave
++    // overlapping loops on Edge.Cuts, so it is subtracted from the outline instead.
++    SHAPE_POLY_SET board;
++
++    if( m_boardOutline.PointCount() >= 3 )
++    {
++        SHAPE_LINE_CHAIN outline = m_boardOutline;
++        outline.SetClosed( true );
++        board.AddOutline( outline );
++    }
++
++    SHAPE_POLY_SET crossing;
++
++    for( SHAPE_LINE_CHAIN& cutout : m_boardCutouts )
++    {
++        if( cutout.PointCount() < 3 )
++            continue;
++
++        cutout.SetClosed( true );
++        SHAPE_LINE_CHAIN::INTERSECTIONS hits;
++        bool inside = !board.IsEmpty() && cutout.Intersect( m_boardOutline, hits ) == 0;
++
++        for( int i = 0; inside && i < cutout.PointCount(); ++i )
++            inside = board.Contains( cutout.CPoint( i ) );
++
++        if( inside || board.IsEmpty() )
++            HelperCreateEdgeCutsFromChain( cutout );
++        else
++            crossing.AddOutline( cutout );
++    }
++
++    if( crossing.IsEmpty() )
++        return;
++
++    board.BooleanSubtract( crossing );
++
++    for( PCB_SHAPE* shape : m_boardOutlineShapes )
++    {
++        m_board->Remove( shape );
++        delete shape;
++    }
++
++    m_boardOutlineShapes.clear();
++
++    for( int ii = 0; ii < board.OutlineCount(); ++ii )
++    {
++        HelperCreateEdgeCutsFromChain( board.Outline( ii ) );
++
++        for( int jj = 0; jj < board.HoleCount( ii ); ++jj )
++            HelperCreateEdgeCutsFromChain( board.Hole( ii, jj ) );
+     }
+ }
+ 
+@@ -3280,7 +3382,10 @@ void ALTIUM_PCB::ConvertShapeBasedRegions6ToBoardItem( const AREGION6& aElem, co
+ {
+     if( aElem.kind == ALTIUM_REGION_KIND::BOARD_CUTOUT )
+     {
+-        HelperCreateBoardOutline( aElem.outline );
++        // Drawn once all are known: see HelperApplyBoardCutouts()
++        SHAPE_LINE_CHAIN cutout;
++        HelperShapeLineChainFromAltiumVertices( cutout, aElem.outline );
++        m_boardCutouts.push_back( cutout );
+     }
+     else if( aElem.kind == ALTIUM_REGION_KIND::POLYGON_CUTOUT || aElem.is_keepout )
+     {
+@@ -4623,8 +4728,19 @@ void ALTIUM_PCB::ConvertPads6ToFootprintItemOnCopper( FOOTPRINT* aFootprint, con
+             // A plated hole with a pad smaller than the hole (mounting holes): the copper is
+             // drilled away, and Altium connects planes and pours to the hole. KiCad gives a pad
+             // smaller than its hole no land, so nothing would connect.
+-            pad->SetSize( PADSTACK::ALL_LAYERS, VECTOR2I( std::max( size.x, pad->GetDrillSize().x ),
+-                                                          std::max( size.y, pad->GetDrillSize().y ) ) );
++            VECTOR2I grown( std::max( size.x, pad->GetDrillSize().x ),
++                            std::max( size.y, pad->GetDrillSize().y ) );
++            pad->SetSize( PADSTACK::ALL_LAYERS, grown );
++
++            // Altium sizes the mask opening from the pad as drawn (keyboard switch stabilisers:
++            // none beyond the hole); keep that opening rather than one from the grown pad
++            // (on a board only: a library footprint has no board expansion to start from)
++            if( m_board && ( pad->GetLayerSet().test( F_Mask ) || pad->GetLayerSet().test( B_Mask ) ) )
++            {
++                int margin = pad->GetLocalSolderMaskMargin().value_or(
++                        m_board->GetDesignSettings().m_SolderMaskExpansion );
++                pad->SetLocalSolderMaskMargin( margin - std::max( grown.x - size.x, grown.y - size.y ) / 2 );
++            }
+         }
+     }
+ 
+@@ -5025,18 +5141,19 @@ void ALTIUM_PCB::ParseVias6Data( const ALTIUM_PCB_COMPOUND_FILE&     aAltiumPcbF
+                 innerRemoved = true;
+         }
+ 
+-        // Altium draws no lands on internal planes, and clears a plane from the via's hole: keep
+-        // a land there only where the via connects, or KiCad's larger clearances (measured from
+-        // the land) cut planes apart in dense via fields (FPGA3: 25 unconnected items).
++        // Altium draws no lands on internal planes, and clears a plane from the via's hole: there
++        // the land is the size of the hole, or KiCad's larger clearances (measured from the land)
++        // cut planes apart in dense via fields (FPGA3: 25 unconnected items). Signal layers keep
++        // their lands, as in Altium.
+         if( !innerRemoved && !endRemoved )
+         {
+-            for( PCB_LAYER_ID layer : LSET( via->GetLayerSet() & LSET::InternalCuMask() ).Seq() )
++            LSET planes = altiumPlaneLayers( m_board ) & via->GetLayerSet();
++
++            if( planes.any() )
+             {
+-                if( m_board->GetLayerType( layer ) == LT_POWER )
+-                {
+-                    innerRemoved = true;
+-                    break;
+-                }
++                int drill = via->GetDrillValue();
++                holeSizedLandsOnPlanes( via->Padstack(), via->GetLayerSet(), planes,
++                                        VECTOR2I( drill, drill ), false );
+             }
+         }
+ 
+diff --git a/pcbnew/pcb_io/altium/altium_pcb.h b/pcbnew/pcb_io/altium/altium_pcb.h
+index 105948f7..8440261e 100644
+--- a/pcbnew/pcb_io/altium/altium_pcb.h
++++ b/pcbnew/pcb_io/altium/altium_pcb.h
+@@ -299,7 +299,11 @@ private:
+ 
+     void HelperFillMechanicalLayerAssignments( const std::vector<ABOARD6_LAYER_STACKUP>& aStackup );
+ 
+-    void HelperCreateBoardOutline( const std::vector<ALTIUM_VERTICE>& aVertices );
++    void HelperCreateBoardOutline( const std::vector<ALTIUM_VERTICE>& aVertices,
++                                   std::vector<PCB_SHAPE*>* aCreated = nullptr );
++    void HelperCreateEdgeCutsFromChain( const SHAPE_LINE_CHAIN& aChain,
++                                        std::vector<PCB_SHAPE*>* aCreated = nullptr );
++    void HelperApplyBoardCutouts();
+ 
+     void HelperSetZoneLayers( ZONE& aZone, const ALTIUM_LAYER aAltiumLayer );
+     void HelperSetZoneKeepoutRestrictions( ZONE& aZone, const uint8_t aKeepoutRestrictions );
+@@ -361,6 +365,9 @@ private:
+     BOARD*                               m_board;
+     std::vector<FOOTPRINT*>              m_components;
+     std::vector<ZONE*>                   m_polygons;
++    SHAPE_LINE_CHAIN                     m_boardOutline;       // as in Board6
++    std::vector<PCB_SHAPE*>              m_boardOutlineShapes; // its Edge.Cuts shapes
++    std::vector<SHAPE_LINE_CHAIN>        m_boardCutouts;       // board cutout regions
+     std::vector<PCB_DIM_RADIAL*>         m_radialDimensions;
+     std::map<uint32_t, wxString>         m_unicodeStrings;
+     std::vector<int>                     m_altiumToKicadNetcodes;
+diff --git a/pcbnew/pcbnew_jobs_handler.cpp b/pcbnew/pcbnew_jobs_handler.cpp
+index 440ddca5..83428d1e 100644
+--- a/pcbnew/pcbnew_jobs_handler.cpp
++++ b/pcbnew/pcbnew_jobs_handler.cpp
+@@ -3563,6 +3563,36 @@ int PCBNEW_JOBS_HANDLER::JobImport( JOB* aJob )
+             return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
+         }
+ 
++        // Altium allows " < > \ in footprint names; KiCad turns them into '_' whenever it reads a
++        // footprint link (LIB_ID::FixIllegalChars), so a footprint keeping them is never found.
++        // Rename here, so the library copy and every link agree.
++        {
++            int renamed = 0;
++
++            for( FOOTPRINT* fp : board->Footprints() )
++            {
++                // Names come escaped from the importer ("{dblquote}"): check what they spell
++                LIB_ID   fpid = fp->GetFPID();
++                wxString name = UnescapeString( fpid.GetUniStringLibItemName() );
++                UTF8     fixed = LIB_ID::FixIllegalChars( UTF8( name ), false );
++
++                if( fixed.wx_str() != name )
++                {
++                    fpid.SetLibItemName( fixed );
++                    fp->SetFPID( fpid );
++                    ++renamed;
++                }
++            }
++
++            if( renamed )
++            {
++                importMessages.Report( wxString::Format( _( "Characters KiCad doesn't allow in footprint "
++                                                            "names replaced by '_' in %d footprints." ),
++                                                         renamed ),
++                                       RPT_SEVERITY_INFO );
++            }
++        }
++
+         if( !job->m_footprintSlash.IsEmpty() )
+         {
+             int renamed = 0;
