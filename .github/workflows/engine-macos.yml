@@ -1,0 +1,109 @@
+# The converter engine for macOS (Apple Silicon): KiCad's kicad-cli with the patches, built
+# against Homebrew and bundled as a minimal KiCad.app, then tested converting a real project.
+name: engine-macos
+
+on:
+  push:
+    branches: [engine-macos]
+    tags: ["v*"]
+  pull_request:
+    paths: ["patches/**", "plugin/engine/**", ".github/workflows/engine-macos.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # release asset on tags
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencies
+        run: |
+          brew update --quiet
+          brew install --quiet cmake ninja ccache pkgconf swig boost wxwidgets@3.2 opencascade \
+            glew glm cairo curl ngspice protobuf nng libgit2 abseil poppler zstd unixodbc \
+            dylibbundler xz
+
+      - name: KiCad source with the patches
+        run: |
+          tag=$(sed -n 's/^ARG KICAD_TAG=//p' Containerfile)
+          commit=$(sed -n 's/^ARG KICAD_COMMIT=//p' Containerfile)
+          git clone -q --depth 1 --branch "$tag" https://gitlab.com/kicad/code/kicad.git kicad
+          test "$(git -C kicad rev-parse HEAD)" = "$commit"
+          export LC_ALL=C
+          for p in patches/[0-9][0-9][0-9][0-9]-*.patch; do
+            echo "applying ${p##*/}"
+            git -C kicad apply --whitespace=nowarn "$PWD/$p"
+          done
+
+      - uses: actions/cache@v4
+        with:
+          path: ccache
+          key: ccache-macos-${{ github.sha }}
+          restore-keys: ccache-macos-
+
+      - name: Build kicad-cli
+        run: |
+          export CCACHE_DIR=$PWD/ccache CCACHE_MAXSIZE=3G
+          brew_prefix=$(brew --prefix)
+          cmake -Wno-dev -G Ninja -S kicad -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_PREFIX_PATH="$brew_prefix;$(brew --prefix wxwidgets@3.2);$(brew --prefix opencascade)" \
+            -DwxWidgets_CONFIG_EXECUTABLE="$(brew --prefix wxwidgets@3.2)/bin/wx-config" \
+            -DOCC_INCLUDE_DIR="$(brew --prefix opencascade)/include/opencascade" \
+            -DNGSPICE_ROOT_DIR="$(brew --prefix ngspice)" \
+            -DKICAD_SCRIPTING_WXPYTHON=OFF -DKICAD_BUILD_I18N=OFF -DKICAD_BUILD_QA_TESTS=OFF \
+            -DKICAD_INSTALL_DEMOS=OFF -DKICAD_UPDATE_CHECK=OFF -DKICAD_USE_SENTRY=OFF \
+            -DKICAD_VERSION_EXTRA=pcbferry
+          ninja -C build -j3 kicad-cli eeschema_kiface pcbnew_kiface cvpcb_kiface
+          ccache -s
+
+      - name: Bundle
+        run: |
+          mkdir -p dist
+          bash plugin/engine/bundle-macos.sh build kicad dist/pcbferry-engine-macos-arm64.tar.xz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engine-macos
+          path: dist/pcbferry-engine-macos-arm64.tar.xz
+          retention-days: 14
+
+      # As a user would run it: the bundle alone, Homebrew moved out of the way
+      - name: Convert a real Altium project with the bundled engine
+        run: |
+          set -euo pipefail
+          mkdir -p engine && tar -xf dist/pcbferry-engine-macos-arm64.tar.xz -C engine
+          brew_prefix=$(brew --prefix)
+          sudo mv "$brew_prefix" "$brew_prefix.off"
+          trap 'sudo mv "$brew_prefix.off" "$brew_prefix"' EXIT
+          export KICAD_CLI=$PWD/engine/pcbferry-engine/bin/kicad-cli
+          "$KICAD_CLI" version
+          /usr/bin/python3 -m venv venv && venv/bin/pip -q install olefile
+          git clone -q https://github.com/yasir-shahzad/Digispark-ATTINY85 attiny
+          git -C attiny checkout -q 98ad05c3af666577e37e6065dfea6969bdd86c8b
+          venv/bin/python pcbferry --check --fill-zones attiny/hardware/ATTiny85.PrjPcb out/ATTiny85
+          venv/bin/python -c "import json; s=json.load(open('out/ATTiny85/import-reports/summary.json')); assert s['ok'], s; print('ok')"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-conversions
+          path: out/*/import-reports/
+          if-no-files-found: ignore
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for i in $(seq 60); do gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 && break; sleep 60; done
+          gh release upload "$GITHUB_REF_NAME" dist/pcbferry-engine-macos-arm64.tar.xz --clobber
