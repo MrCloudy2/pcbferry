@@ -28,7 +28,7 @@ jobs:
         run: |
           brew update --quiet
           brew install --quiet cmake ninja ccache pkgconf swig boost wxwidgets@3.2 opencascade \
-            glew glm cairo curl ngspice protobuf nng libgit2 abseil poppler zstd unixodbc \
+            glew glm cairo curl libngspice protobuf nng libgit2 abseil poppler zstd unixodbc \
             dylibbundler xz
 
       - name: KiCad source with the patches
@@ -59,7 +59,7 @@ jobs:
             -DCMAKE_PREFIX_PATH="$brew_prefix;$(brew --prefix wxwidgets@3.2);$(brew --prefix opencascade)" \
             -DwxWidgets_CONFIG_EXECUTABLE="$(brew --prefix wxwidgets@3.2)/bin/wx-config" \
             -DOCC_INCLUDE_DIR="$(brew --prefix opencascade)/include/opencascade" \
-            -DNGSPICE_ROOT_DIR="$(brew --prefix ngspice)" \
+            -DNGSPICE_ROOT_DIR="$(brew --prefix libngspice)" \
             -DKICAD_SCRIPTING_WXPYTHON=OFF -DKICAD_BUILD_I18N=OFF -DKICAD_BUILD_QA_TESTS=OFF \
             -DKICAD_INSTALL_DEMOS=OFF -DKICAD_UPDATE_CHECK=OFF -DKICAD_USE_SENTRY=OFF \
             -DKICAD_VERSION_EXTRA=pcbferry
