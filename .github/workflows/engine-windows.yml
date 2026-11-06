@@ -1,0 +1,126 @@
+# The converter engine for Windows: KiCad's kicad-cli with the patches, built with MSYS2
+# (UCRT64) and bundled with its DLLs, then tested from plain Windows (no MSYS2 on PATH).
+name: engine-windows
+
+on:
+  push:
+    branches: [engine-windows]
+    tags: ["v*"]
+  pull_request:
+    paths: ["patches/**", "plugin/engine/**", ".github/workflows/engine-windows.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # release asset on tags
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 340
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git tar xz
+            mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-ccache mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-swig
+            mingw-w64-ucrt-x86_64-boost mingw-w64-ucrt-x86_64-wxwidgets3.2-msw
+            mingw-w64-ucrt-x86_64-abseil-cpp mingw-w64-ucrt-x86_64-cairo mingw-w64-ucrt-x86_64-curl
+            mingw-w64-ucrt-x86_64-glew mingw-w64-ucrt-x86_64-glm mingw-w64-ucrt-x86_64-nng
+            mingw-w64-ucrt-x86_64-protobuf mingw-w64-ucrt-x86_64-libgit2 mingw-w64-ucrt-x86_64-ngspice
+            mingw-w64-ucrt-x86_64-opencascade mingw-w64-ucrt-x86_64-openssl mingw-w64-ucrt-x86_64-zlib
+            mingw-w64-ucrt-x86_64-python mingw-w64-ucrt-x86_64-freeglut mingw-w64-ucrt-x86_64-poppler
+
+      - name: KiCad source with the patches
+        run: |
+          tag=$(sed -n 's/^ARG KICAD_TAG=//p' Containerfile)
+          commit=$(sed -n 's/^ARG KICAD_COMMIT=//p' Containerfile)
+          git clone -q --depth 1 --branch "$tag" https://gitlab.com/kicad/code/kicad.git kicad
+          test "$(git -C kicad rev-parse HEAD)" = "$commit"
+          export LC_ALL=C
+          for p in plugin/engine/msys2/*.patch patches/[0-9][0-9][0-9][0-9]-*.patch; do
+            echo "applying ${p##*/}"
+            git -C kicad apply --whitespace=nowarn "$PWD/$p"
+          done
+
+      - uses: actions/cache@v4
+        with:
+          path: ccache
+          key: ccache-windows-${{ github.sha }}
+          restore-keys: ccache-windows-
+
+      - name: Build kicad-cli
+        run: |
+          export CCACHE_DIR=$PWD/ccache CCACHE_MAXSIZE=3G
+          MSYS2_ARG_CONV_EXCL="-DCMAKE_INSTALL_PREFIX=;-DCMAKE_PREFIX_PATH=;-DDEFAULT_INSTALL_PATH=" \
+          cmake -Wno-dev -G Ninja -S kicad -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_PREFIX_PATH=$MINGW_PREFIX -DDEFAULT_INSTALL_PATH=$MINGW_PREFIX \
+            -DwxWidgets_CONFIG_EXECUTABLE=$MINGW_PREFIX/bin/wx-config-3.2 \
+            -DOCC_INCLUDE_DIR=$MINGW_PREFIX/include/opencascade \
+            -DNGSPICE_ROOT_DIR=$MINGW_PREFIX \
+            -DKICAD_SCRIPTING_WXPYTHON=OFF -DKICAD_BUILD_I18N=OFF -DKICAD_BUILD_QA_TESTS=OFF \
+            -DKICAD_INSTALL_DEMOS=OFF -DKICAD_UPDATE_CHECK=OFF -DKICAD_USE_SENTRY=OFF \
+            -DKICAD_VERSION_EXTRA=pcbferry
+          ninja -C build -j4 kicad-cli eeschema_kiface pcbnew_kiface cvpcb_kiface
+          ccache -s
+
+      - name: Bundle
+        run: |
+          mkdir -p dist
+          bash plugin/engine/bundle-windows.sh build kicad dist/pcbferry-engine-windows-x86_64.tar.xz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engine-windows
+          path: dist/pcbferry-engine-windows-x86_64.tar.xz
+          retention-days: 14
+
+      # As a user would run it: Windows Python, no MSYS2 on PATH
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Convert real Altium projects with the bundled engine
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:PATH = "C:\Windows\System32;C:\Windows;" + (Split-Path (Get-Command python).Source)
+          New-Item -ItemType Directory -Force engine | Out-Null
+          tar -xf dist/pcbferry-engine-windows-x86_64.tar.xz -C engine
+          $env:KICAD_CLI = "$PWD\engine\pcbferry-engine\bin\kicad-cli.exe"
+          & $env:KICAD_CLI version
+          python -m pip install -q olefile
+          git clone -q https://github.com/yasir-shahzad/Digispark-ATTINY85 attiny
+          git -C attiny checkout -q 98ad05c3af666577e37e6065dfea6969bdd86c8b
+          python pcbferry --check --fill-zones attiny/hardware/ATTiny85.PrjPcb out/ATTiny85
+          python -c "import json,sys; s=json.load(open('out/ATTiny85/import-reports/summary.json')); assert s['ok'], s; print('ok')"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-conversions
+          path: out/*/import-reports/
+          if-no-files-found: ignore
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # The ci workflow creates the release; wait for it
+          for ($i = 0; $i -lt 60 -and -not (gh release view $env:GITHUB_REF_NAME 2>$null); $i++) { Start-Sleep 60 }
+          gh release upload $env:GITHUB_REF_NAME dist/pcbferry-engine-windows-x86_64.tar.xz --clobber
