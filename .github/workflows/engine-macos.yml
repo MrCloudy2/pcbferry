@@ -55,8 +55,9 @@ jobs:
           brew_prefix=$(brew --prefix)
           py=$brew_prefix/bin/python3
           py_inc=$($py -c 'import sysconfig; print(sysconfig.get_path("include"))')
-          py_lib=$($py -c 'import sysconfig, os; print(os.path.join(sysconfig.get_config_var("LIBPL") or sysconfig.get_config_var("LIBDIR"), sysconfig.get_config_var("LDLIBRARY")))')
-          [ -f "$py_lib" ] || py_lib=$($py -c 'import sysconfig, os; print(os.path.join(sysconfig.get_config_var("LIBDIR"), sysconfig.get_config_var("LDLIBRARY")))')
+          # A framework build's library is Python.framework/Versions/X.Y/Python under its prefix
+          py_lib=$($py -c 'import sysconfig, os; v=sysconfig.get_config_var; print(os.path.join(v("PYTHONFRAMEWORKPREFIX"), v("LDLIBRARY")) if v("PYTHONFRAMEWORK") else os.path.join(v("LIBDIR"), v("LDLIBRARY")))')
+          test -f "$py_lib"
           echo "python: $py $py_inc $py_lib"
           cmake -Wno-dev -G Ninja -S kicad -B build \
             -DPYTHON_EXECUTABLE="$py" -DPYTHON_INCLUDE_DIR="$py_inc" -DPYTHON_LIBRARY="$py_lib" \
