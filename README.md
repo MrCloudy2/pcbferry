@@ -65,6 +65,9 @@ Install it from a recent KiCad 10 (10.0.7 works): KiCad 10.0.0's package manager
 script's executable bit, and the button then does nothing. KiCads that share the same
 settings, such as a distribution package and an AppImage, share the installed plugin.
 
+A KiCad project holds one board, so for an Altium project with several boards the plugin
+asks which one, or converts each into its own KiCad project.
+
 The first use downloads the converter engine (about 150 MB) from the same release. If
 nothing happens on a click, `~/.local/share/pcbferry/plugin.log` says why.
 
