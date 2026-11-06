@@ -63,7 +63,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_PREFIX_PATH="$brew_prefix;$(brew --prefix wxwidgets@3.2);$(brew --prefix opencascade)" \
-            -DwxWidgets_CONFIG_EXECUTABLE="$(brew --prefix wxwidgets@3.2)/bin/wx-config" \
+            -DwxWidgets_CONFIG_EXECUTABLE="$(brew --prefix wxwidgets@3.2)/bin/wx-config-3.2" \
             -DOCC_INCLUDE_DIR="$(brew --prefix opencascade)/include/opencascade" \
             -DNGSPICE_ROOT_DIR="$(brew --prefix libngspice)" -DNGSPICE_LIB_NAME=ngspice \
             -DKICAD_SCRIPTING_WXPYTHON=OFF -DKICAD_BUILD_I18N=OFF -DKICAD_BUILD_QA_TESTS=OFF \
