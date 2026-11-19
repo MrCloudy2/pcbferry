@@ -65,6 +65,7 @@ jobs:
           cargo fmt --check
           cargo clippy --release --all-targets -- -D warnings
           cargo test --release --lib
+          cargo build --release
 
       - name: KiCad's demo boards as PcbDocs
         run: |
