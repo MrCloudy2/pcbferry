@@ -52,6 +52,11 @@ for f in $(machos); do
     done
 done
 
+# Each bundled library names itself by where it now is (otool -L lists that name too)
+for f in "$app"/Frameworks/*.dylib; do
+    install_name_tool -id "@executable_path/../Frameworks/$(basename "$f")" "$f"
+done
+
 # Nothing may still point outside the bundle and the system
 bad=0
 for f in $(machos); do
