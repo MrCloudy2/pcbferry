@@ -1,0 +1,17 @@
+[package]
+name = "pcbferry-k2a"
+version = "0.1.0"
+edition = "2021"
+description = "KiCad board to Altium PcbDoc converter (pcbferry's reverse direction)"
+license = "GPL-3.0-or-later"
+publish = false
+
+[[bin]]
+name = "kicad2altium"
+path = "src/main.rs"
+
+[dependencies]
+cfb = "0.16"
+
+[profile.release]
+lto = true
