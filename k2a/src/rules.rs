@@ -105,7 +105,7 @@ fn used(b: &Board) -> Used {
         .filter(|&w| w > 0)
         .min()
         .unwrap_or(0);
-    let max_via =b.vias.iter().map(|v| v.size).max().unwrap_or(0);
+    let max_via = b.vias.iter().map(|v| v.size).max().unwrap_or(0);
     let max_via_drill = b.vias.iter().map(|v| v.drill).max().unwrap_or(0);
     let holes = b
         .footprints

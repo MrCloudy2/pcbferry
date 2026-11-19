@@ -1008,7 +1008,11 @@ pub fn convert(
         if sch.lib.get(&sym.lib_key).is_none_or(|l| l.power) {
             continue;
         }
-        let name = sym.lib_id.split_once(':').map_or(sym.lib_id.as_str(), |x| x.1).to_string();
+        let name = sym
+            .lib_id
+            .split_once(':')
+            .map_or(sym.lib_id.as_str(), |x| x.1)
+            .to_string();
         let e = lib_of_ref
             .entry(reference(sym, path))
             .or_insert((sym.unit, name.clone()));

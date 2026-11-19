@@ -1041,7 +1041,11 @@ impl Ctx<'_> {
             };
             stack.push((name, v8, L::Copper(i == 0)));
             if i + 1 < chain.len() {
-                stack.push((format!("Dielectric {}", i + 1), 0x0104_0001 + i as u32, L::Dielectric(i)));
+                stack.push((
+                    format!("Dielectric {}", i + 1),
+                    0x0104_0001 + i as u32,
+                    L::Dielectric(i),
+                ));
             }
         }
         stack.extend([
@@ -1071,7 +1075,13 @@ impl Ctx<'_> {
                     let bottom = *id == 0x0100_FFFF;
                     p.set(&format!("{k}COPTHICK"), "1.4mil").num(
                         &format!("{k}COMPONENTPLACEMENT"),
-                        if *top { 1 } else if bottom { 2 } else { 0 },
+                        if *top {
+                            1
+                        } else if bottom {
+                            2
+                        } else {
+                            0
+                        },
                     );
                 }
                 L::Dielectric(i) => {
@@ -1156,7 +1166,14 @@ fn guid(seed: &str) -> String {
     // version 4 / variant 1 bits, as a random GUID has
     let v = (v & !(0xf << 76) | (0x4 << 76)) & !(0x3 << 62) | (0x2 << 62);
     let s = format!("{v:032X}");
-    format!("{{{}-{}-{}-{}-{}}}", &s[0..8], &s[8..12], &s[12..16], &s[16..20], &s[20..32])
+    format!(
+        "{{{}-{}-{}-{}-{}}}",
+        &s[0..8],
+        &s[8..12],
+        &s[12..16],
+        &s[16..20],
+        &s[20..32]
+    )
 }
 
 fn outline_bbox(b: &Board) -> Option<(Pt, Pt)> {
