@@ -199,7 +199,7 @@ pub fn compare(orig: &Board, back: &Board) -> Comparison {
     let dist = |a: Pt, b: Pt| ((a.x - b.x) as f64).hypot((a.y - b.y) as f64);
     for f in &orig.footprints {
         cf.total += 1;
-        let copper = |p: &&crate::kicad::Pad| p.layers.iter().any(|l| l.ends_with(".Cu"));
+        let copper = |p: &&crate::kicad::Pad| !is_aperture(p);
         cp.total += f.pads.iter().filter(copper).count();
         let pick = by_ref.get_mut(f.reference.as_str()).and_then(|v| {
             let at = mv(f.place.at);
@@ -662,11 +662,7 @@ pub fn compare(orig: &Board, back: &Board) -> Comparison {
     // Aperture pads (paste or mask only): something drawn there on that layer
     let mut cap = Category::new("aperture pads");
     for f in &orig.footprints {
-        for p in f
-            .pads
-            .iter()
-            .filter(|p| !p.layers.iter().any(|l| l.ends_with(".Cu")))
-        {
+        for p in f.pads.iter().filter(|p| is_aperture(p)) {
             let ls: Vec<String> = p
                 .layers
                 .iter()
@@ -813,7 +809,7 @@ fn covers(s: &Shape, width: Nm, p: Pt) -> bool {
 fn aperture_at(orig: &Board, layer: &str, s: &Shape, mv: &dyn Fn(Pt) -> Pt) -> bool {
     let (a, b) = bbox(s);
     orig.footprints.iter().flat_map(|f| f.pads.iter()).any(|p| {
-        !p.layers.iter().any(|l| l.ends_with(".Cu"))
+        is_aperture(p)
             && p.layers.iter().any(|l| {
                 l == layer
                     || (l == "*.Mask" && layer.ends_with(".Mask"))
@@ -825,4 +821,10 @@ fn aperture_at(orig: &Board, layer: &str, s: &Shape, mv: &dyn Fn(Pt) -> Pt) -> b
                 a.x >= c.x - r && b.x <= c.x + r && a.y >= c.y - r && b.y <= c.y + r
             }
     })
+}
+
+/// A pad on paste or mask alone (a hole is a pad even without copper)
+fn is_aperture(p: &crate::kicad::Pad) -> bool {
+    matches!(p.kind, PadKind::Smd | PadKind::Connect)
+        && !p.layers.iter().any(|l| l.ends_with(".Cu"))
 }

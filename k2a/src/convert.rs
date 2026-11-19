@@ -730,7 +730,7 @@ fn component(fp: &Footprint, index: usize) -> Vec<u8> {
 }
 
 /// Altium's 8-letter unique ids, derived from the position so a rerun gives the same file
-fn unique_id(i: usize) -> String {
+pub(crate) fn unique_id(i: usize) -> String {
     let mut x = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0x5bd1_e995;
     (0..8)
         .map(|_| {
@@ -933,7 +933,7 @@ fn outline_bbox(b: &Board) -> Option<(Pt, Pt)> {
     Some((min, max))
 }
 
-pub fn convert(b: &Board) -> (Doc, Report) {
+pub fn convert(b: &Board, project: Option<&crate::project::Project>) -> (Doc, Report) {
     let mut c = Ctx {
         b,
         doc: Doc::default(),
@@ -1057,7 +1057,14 @@ pub fn convert(b: &Board) -> (Doc, Report) {
         ));
     }
 
-    crate::zones::write(&mut c.doc, b, &mut c.report);
+    let polygons = crate::zones::write(&mut c.doc, b, &mut c.report);
+    crate::rules::write(&mut c.doc, b, project, &polygons);
+    if project.is_none() {
+        c.report.warn(
+            "no .kicad_pro next to the board: net classes and design rules are Altium's defaults"
+                .into(),
+        );
+    }
 
     let counts = [
         "Components6",

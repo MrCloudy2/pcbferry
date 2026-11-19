@@ -199,6 +199,10 @@ pub struct Zone {
     pub no_footprints: bool,
     pub priority: i64,
     pub clearance: Nm,
+    /// How pads join the fill: "thermal" (KiCad's default), "solid", "none", "thru_hole_only"
+    pub connect: String,
+    pub thermal_gap: Nm,
+    pub thermal_bridge: Nm,
     pub min_thickness: Nm,
     /// Filled copper per layer: outline polygons as KiCad saved them
     pub fills: Vec<(String, Vec<Pt>)>,
@@ -211,6 +215,11 @@ pub struct Board {
     /// Canonical layer name -> the name the user gave it
     pub layer_names: HashMap<String, String>,
     pub thickness: Nm,
+    /// Board setup: mask and paste expansion of pads, minimum mask web
+    pub mask_expansion: Nm,
+    pub paste_expansion: Nm,
+    pub paste_ratio: f64,
+    pub mask_min_width: Nm,
     /// Net names; index 0 is "no net"
     pub nets: Vec<String>,
     pub tracks: Vec<Track>,
@@ -648,6 +657,23 @@ fn zone(e: &Sexpr, nets: &mut Nets) -> Zone {
             .and_then(|c| c.arg_num("clearance", 0))
             .map(mm)
             .unwrap_or(0),
+        connect: match e.child("connect_pads").and_then(|c| c.args().first()) {
+            Some(Sexpr::Atom(t)) if t == "yes" => "solid",
+            Some(Sexpr::Atom(t)) if t == "no" => "none",
+            Some(Sexpr::Atom(t)) if t == "thru_hole_only" => "thru_hole_only",
+            _ => "thermal",
+        }
+        .to_string(),
+        thermal_gap: e
+            .child("fill")
+            .and_then(|f| f.arg_num("thermal_gap", 0))
+            .map(mm)
+            .unwrap_or(500_000),
+        thermal_bridge: e
+            .child("fill")
+            .and_then(|f| f.arg_num("thermal_bridge_width", 0))
+            .map(mm)
+            .unwrap_or(500_000),
         min_thickness: e.arg_num("min_thickness", 0).map(mm).unwrap_or(250_000),
         fills,
     }

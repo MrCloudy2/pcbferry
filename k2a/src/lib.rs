@@ -6,6 +6,8 @@ pub mod convert;
 pub mod geom;
 pub mod kicad;
 pub mod outline;
+pub mod project;
+pub mod rules;
 pub mod sexpr;
 mod templates;
 pub mod zones;
@@ -19,7 +21,13 @@ pub fn convert_file(
 ) -> Result<convert::Report, Box<dyn std::error::Error>> {
     let text = std::fs::read_to_string(input)?;
     let board = kicad::read(&text)?;
-    let (doc, report) = convert::convert(&board);
+    // Net classes and design rules live in the project file next to the board
+    let pro = input.with_extension("kicad_pro");
+    let project = match std::fs::read_to_string(&pro) {
+        Ok(t) => Some(project::parse(&t).map_err(|e| format!("{}: {e}", pro.display()))?),
+        Err(_) => None,
+    };
+    let (doc, report) = convert::convert(&board, project.as_ref());
     doc.write(output)?;
     Ok(report)
 }

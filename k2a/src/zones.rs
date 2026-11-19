@@ -4,12 +4,15 @@ use crate::altium::{mil, Buf, Doc, Props};
 use crate::convert::{coords, layer_for_zone, net_index, v7_name, Report};
 use crate::kicad::{Board, Pt};
 
-pub fn write(doc: &mut Doc, b: &Board, report: &mut Report) {
-    for z in &b.zones {
+/// Returns, for each zone, the names of the Altium polygons made from it
+pub fn write(doc: &mut Doc, b: &Board, report: &mut Report) -> Vec<Vec<String>> {
+    let mut made: Vec<Vec<String>> = vec![Vec::new(); b.zones.len()];
+    for (zi, z) in b.zones.iter().enumerate() {
         if z.keepout {
             keepout(doc, b, z, report);
             continue;
         }
+        let _ = zi;
         for layer in &z.layers {
             let names: Vec<String> = if layer == "F&B.Cu" || layer == "*.Cu" {
                 if layer == "*.Cu" {
@@ -60,7 +63,9 @@ pub fn write(doc: &mut Doc, b: &Board, report: &mut Report) {
                 p.num("POURINDEX", z.priority)
                     .bool("IGNOREVIOLATIONS", false);
                 p.num("NET", net_index(z.net));
-                p.set("NAME", format!("Polygon {index}"));
+                let pname = format!("Polygon {index}");
+                p.set("NAME", pname.as_str());
+                made[zi].push(pname);
                 doc.storage("Polygons6").push(&p.encode());
 
                 for (fl, pts) in z.fills.iter().filter(|(fl, _)| *fl == name) {
@@ -72,6 +77,7 @@ pub fn write(doc: &mut Doc, b: &Board, report: &mut Report) {
             }
         }
     }
+    made
 }
 
 /// A rule area as Altium keep-out regions: on the Keep-Out layer when it covers every copper
