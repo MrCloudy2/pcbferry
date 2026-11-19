@@ -99,7 +99,9 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          $git = Get-Command git
           $env:PATH = "C:\Windows\System32;C:\Windows;" + (Split-Path (Get-Command python).Source)
+          Set-Alias git $git.Source
           New-Item -ItemType Directory -Force engine | Out-Null
           # As the plugin does it: Python's tarfile (Windows' own tar has no xz)
           python -c "import tarfile; tarfile.open('dist/pcbferry-engine-windows-x86_64.tar.xz').extractall('engine')"
