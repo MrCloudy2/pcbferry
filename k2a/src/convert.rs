@@ -674,8 +674,19 @@ impl Ctx<'_> {
         };
         // KiCad's markup (~{overbar}, ^{super}, _{sub}) has no Altium form: its plain text
         let (written, shown) = (strip_markup(&written), strip_markup(&shown));
+        // Altium's glyphs are as wide as they are high. On copper a KiCad text narrower than it
+        // is high would come out wider than in KiCad, and its copper would reach what KiCad
+        // keeps clear of it (Altium's DRC flags shorts on pic_programmer), so there the text
+        // is as high as KiCad's glyphs are wide: its copper stays inside KiCad's
+        let copper = (1..=32).contains(&l.v6);
+        let height = if copper && t.width > 0 && t.width < t.height {
+            t.width
+        } else {
+            t.height
+        };
         let t = &Text {
             text: written,
+            height,
             ..t.clone()
         };
         let mut b = templates::TEXT;
