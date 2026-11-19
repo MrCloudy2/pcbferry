@@ -4,17 +4,18 @@ name: engine-macos
 
 on:
   push:
-    branches: [engine-macos]
-    tags: ["v*"]
+    branches: [main]
+    paths: ["patches/**", "plugin/engine/**", ".github/workflows/engine-macos.yml"]
   pull_request:
     paths: ["patches/**", "plugin/engine/**", ".github/workflows/engine-macos.yml"]
   workflow_dispatch:
+  workflow_call:   # from ci on v* tags, which packages the plugin with every engine
 
 permissions:
-  contents: write   # release asset on tags
+  contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: engine-macos-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -115,10 +116,3 @@ jobs:
           path: out/*/import-reports/
           if-no-files-found: ignore
 
-      - name: Attach to the release
-        if: startsWith(github.ref, 'refs/tags/v')
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          for i in $(seq 60); do gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 && break; sleep 60; done
-          gh release upload "$GITHUB_REF_NAME" dist/pcbferry-engine-macos-arm64.tar.xz --clobber
