@@ -101,7 +101,8 @@ jobs:
           $ErrorActionPreference = "Stop"
           $env:PATH = "C:\Windows\System32;C:\Windows;" + (Split-Path (Get-Command python).Source)
           New-Item -ItemType Directory -Force engine | Out-Null
-          tar -xf dist/pcbferry-engine-windows-x86_64.tar.xz -C engine
+          # As the plugin does it: Python's tarfile (Windows' own tar has no xz)
+          python -c "import tarfile; tarfile.open('dist/pcbferry-engine-windows-x86_64.tar.xz').extractall('engine')"
           $env:KICAD_CLI = "$PWD\engine\pcbferry-engine\bin\kicad-cli.exe"
           & $env:KICAD_CLI version
           python -m pip install -q olefile
