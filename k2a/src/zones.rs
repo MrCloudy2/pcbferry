@@ -39,13 +39,21 @@ pub fn write(doc: &mut Doc, b: &Board, report: &mut Report) -> Vec<Vec<String>> 
                     .bool("KEEPOUT", false);
                 p.num("UNIONINDEX", 0).bool("PRIMITIVELOCK", false);
                 p.set("POLYGONTYPE", "Polygon");
-                p.num("POUROVER", 1).bool("REMOVEDEAD", false);
+                // pour over same-net objects, as KiCad does; Altium reads "1" here as FALSE
+                p.bool("POUROVER", true)
+                    .num("POUROVERSTYLE", 1)
+                    .bool("REMOVEDEAD", false);
                 p.set("GRIDSIZE", mil(z.min_thickness / 2))
                     .set("TRACKWIDTH", mil(z.min_thickness));
                 p.set("HATCHSTYLE", "Solid")
                     .bool("USEOCTAGONS", false)
                     .set("MINPRIMLENGTH", mil(0));
-                for (i, v) in z.outline.iter().enumerate() {
+                // Altium repeats the first vertex at the end; without it Altium Designer drops
+                // the last edge and repours a smaller polygon (a rectangle comes out a triangle)
+                let closed = z.outline.first() != z.outline.last();
+                let first = z.outline[0];
+                let outline = z.outline.iter().chain(closed.then_some(&first));
+                for (i, v) in outline.enumerate() {
                     let (x, y) = coords(*v);
                     let k = i.to_string();
                     p.num(&format!("KIND{k}"), 0);
