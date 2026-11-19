@@ -1,7 +1,7 @@
-diff --git a/a/pcbnew/pcb_io/altium/altium_parser_pcb.cpp b/b/pcbnew/pcb_io/altium/altium_parser_pcb.cpp
+diff --git a/pcbnew/pcb_io/altium/altium_parser_pcb.cpp b/pcbnew/pcb_io/altium/altium_parser_pcb.cpp
 index 5bdd494..0964241 100644
---- a/a/pcbnew/pcb_io/altium/altium_parser_pcb.cpp
-+++ b/b/pcbnew/pcb_io/altium/altium_parser_pcb.cpp
+--- a/pcbnew/pcb_io/altium/altium_parser_pcb.cpp
++++ b/pcbnew/pcb_io/altium/altium_parser_pcb.cpp
 @@ -698,6 +698,7 @@ ACOMPONENT6::ACOMPONENT6( ALTIUM_BINARY_PARSER& aReader )
      locked           = ALTIUM_PROPS_UTILS::ReadBool( props, wxT( "LOCKED" ), false );
      nameon           = ALTIUM_PROPS_UTILS::ReadBool( props, wxT( "NAMEON" ), true );
@@ -10,10 +10,10 @@ index 5bdd494..0964241 100644
      sourcedesignator = ALTIUM_PROPS_UTILS::ReadString( props, wxT( "SOURCEDESIGNATOR" ), wxT( "" ) );
  
      sourceUniqueID = ALTIUM_PROPS_UTILS::ReadString( props, wxT( "SOURCEUNIQUEID" ), wxT( "" ) );
-diff --git a/a/pcbnew/pcb_io/altium/altium_parser_pcb.h b/b/pcbnew/pcb_io/altium/altium_parser_pcb.h
+diff --git a/pcbnew/pcb_io/altium/altium_parser_pcb.h b/pcbnew/pcb_io/altium/altium_parser_pcb.h
 index 236b80d..5d62aa5 100644
---- a/a/pcbnew/pcb_io/altium/altium_parser_pcb.h
-+++ b/b/pcbnew/pcb_io/altium/altium_parser_pcb.h
+--- a/pcbnew/pcb_io/altium/altium_parser_pcb.h
++++ b/pcbnew/pcb_io/altium/altium_parser_pcb.h
 @@ -557,6 +557,7 @@ struct ACOMPONENT6
      bool         locked;
      bool         nameon;
@@ -22,10 +22,10 @@ index 236b80d..5d62aa5 100644
      wxString     sourceUniqueID;
      wxString     sourceHierachicalPath;
      wxString     sourcedesignator;
-diff --git a/a/pcbnew/pcb_io/altium/altium_pcb.cpp b/b/pcbnew/pcb_io/altium/altium_pcb.cpp
+diff --git a/pcbnew/pcb_io/altium/altium_pcb.cpp b/pcbnew/pcb_io/altium/altium_pcb.cpp
 index 82c07de..42b35f9 100644
---- a/a/pcbnew/pcb_io/altium/altium_pcb.cpp
-+++ b/b/pcbnew/pcb_io/altium/altium_pcb.cpp
+--- a/pcbnew/pcb_io/altium/altium_pcb.cpp
++++ b/pcbnew/pcb_io/altium/altium_pcb.cpp
 @@ -2076,6 +2076,14 @@ void ALTIUM_PCB::ParseComponents6Data( const ALTIUM_PCB_COMPOUND_FILE& aAltiumPc
          footprint->SetSheetfile( elem.sourceHierachicalPath + wxT( ".kicad_sch" ));
  
