@@ -81,6 +81,7 @@ fn scope_class(name: &str) -> String {
 
 /// Sizes the board actually uses, so maximum limits never flag what is already there
 struct Used {
+    min_track: Nm,
     max_track: Nm,
     max_via: Nm,
     max_via_drill: Nm,
@@ -96,7 +97,15 @@ fn used(b: &Board) -> Used {
         .chain(b.arcs.iter().map(|a| a.width))
         .max()
         .unwrap_or(0);
-    let max_via = b.vias.iter().map(|v| v.size).max().unwrap_or(0);
+    let min_track = b
+        .tracks
+        .iter()
+        .map(|t| t.width)
+        .chain(b.arcs.iter().map(|a| a.width))
+        .filter(|&w| w > 0)
+        .min()
+        .unwrap_or(0);
+    let max_via =b.vias.iter().map(|v| v.size).max().unwrap_or(0);
     let max_via_drill = b.vias.iter().map(|v| v.drill).max().unwrap_or(0);
     let holes = b
         .footprints
@@ -111,6 +120,7 @@ fn used(b: &Board) -> Used {
         max_hole = max_hole.max(h);
     }
     Used {
+        min_track,
         max_track,
         max_via,
         max_via_drill,
@@ -207,8 +217,14 @@ pub fn write(doc: &mut Doc, b: &Board, project: Option<&Project>, polygons: &[Ve
         }
     }
 
-    // Track width: preferred from the class, the minimum from the board, the maximum what is used
-    let min_w = pr.rules.min_track_width.unwrap_or(0);
+    // Track width: preferred from the class, the minimum from the board, the maximum what is used.
+    // Altium takes a minimum of 0 as no limit at all (its DRC report shows Min=99999mil), so
+    // without one from KiCad the narrowest track the board has is the minimum
+    let min_w = pr
+        .rules
+        .min_track_width
+        .filter(|&w| w > 0)
+        .unwrap_or(u.min_track);
     let widths: Vec<Nm> = pr.classes.iter().filter_map(|c| c.track_width).collect();
     let max_w = widths
         .iter()

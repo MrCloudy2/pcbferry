@@ -549,18 +549,21 @@ impl Ctx<'_> {
             .u8(101, if paste_manual { 2 } else { 1 })
             .u8(102, if mask_manual { 2 } else { 1 })
             .f64(106, 0.0)
-            // The pad's copper layer as the low half of its layer stack id (top 0x0001, mid n
-            // 0x00nn, bottom 0xFFFF), as Altium Designer writes it; AD26 reads 0x0020 as a
-            // Mid-Layer 31, adds that layer to the stack and drops the pad
+            // The pad's copper as Altium Designer writes it, whatever the layer count: an SMD
+            // pad's layer as the low half of its layer stack id (top 0x0001, mid n 0x00nn,
+            // bottom 0xFFFF), a through-hole pad 0x000F with byte 116 = 3. AD26 reads an SMD
+            // 0x0020 as a Mid-Layer 31 (adds it to the stack and drops the pad), and a
+            // through-hole 0x0001 as a pad on the top layer only, which no bottom track reaches
             .u16(
                 114,
                 match layer {
-                    _ if !smd => 1,
+                    _ if !smd => 0x000F,
                     2..=31 => layer as u16,
                     32 | 34 | 36 | 38 => 0xFFFF,
                     _ => 1,
                 },
             )
+            .u8(116, if smd { 0 } else { 3 })
             // KiCad's importer reads byte 117 as a "from layer", but Altium Designer writes 1 here
             // on every pad (top, bottom and through-hole alike) and AD26 refuses the whole Pads6
             // storage ("Catastrophic failure") when it is anything else
