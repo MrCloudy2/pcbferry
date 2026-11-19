@@ -32,7 +32,7 @@ while [ ${#todo[@]} -gt 0 ]; do
     done
     todo=("${next[@]+"${next[@]}"}")
 done
-ls "$E/bin" | wc -l
+find "$E/bin" -maxdepth 1 -type f | wc -l
 
 cp "$src/resources/project_template/kicad.kicad_pro" "$E/share/kicad/template/"
 cp "$src"/api/schemas/*.json "$src"/resources/schemas/*.json "$E/share/kicad/schemas/"
