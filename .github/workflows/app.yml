@@ -1,0 +1,88 @@
+# The Rust app (app/): lint, test and build pcbferry-app and the pcbferry command line on
+# Linux, macOS and Windows, and package each. Called by ci.yml for a release.
+name: app
+
+on:
+  push:
+    branches: [main]
+    paths: ["app/**", "k2a/**", ".github/workflows/app.yml"]
+  pull_request:
+    paths: ["app/**", "k2a/**", ".github/workflows/app.yml"]
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux-x86_64
+          - os: macos-14
+            platform: macos-arm64
+          - os: windows-2022
+            platform: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            app/target
+          key: app-${{ matrix.platform }}-${{ hashFiles('app/Cargo.lock') }}
+
+      - name: Lint and test
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.platform }}" = linux-x86_64 ]; then cargo fmt --check; fi
+          cargo clippy --release --all-targets -- -D warnings
+          cargo test --release
+
+      - name: Build and package
+        run: |
+          set -euo pipefail
+          cargo build --release
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          mkdir -p ../dist
+          name=pcbferry-app-${{ matrix.platform }}
+          case "${{ matrix.platform }}" in
+            linux-*)
+              mkdir -p "pkg/$name"
+              cp target/release/pcbferry-app target/release/pcbferry "pkg/$name/"
+              tar -C pkg -czf "../dist/$name.tar.gz" "$name"
+              ;;
+            macos-*)
+              app=pkg/pcbferry.app/Contents
+              mkdir -p "$app/MacOS"
+              cp target/release/pcbferry-app target/release/pcbferry "$app/MacOS/"
+              sed "s/@VERSION@/$version/" packaging/Info.plist > "$app/Info.plist"
+              (cd pkg && ditto -c -k --keepParent pcbferry.app "../../dist/$name.zip")
+              ;;
+            windows-*)
+              mkdir -p "pkg/$name"
+              cp target/release/pcbferry-app.exe target/release/pcbferry.exe "pkg/$name/"
+              (cd pkg && 7z a -bso0 "../../dist/$name.zip" "$name")
+              ;;
+          esac
+          ls -l ../dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-${{ matrix.platform }}
+          path: dist/pcbferry-app-*
+          retention-days: 7

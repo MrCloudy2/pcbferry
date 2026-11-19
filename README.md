@@ -74,6 +74,19 @@ nothing happens on a click, `~/.local/share/pcbferry/plugin.log` says why.
 The engine is the same patched `kicad-cli` as in the container, so results are
 identical. Windows and macOS engines are next; until then use the container there.
 
+## Desktop app (preview)
+
+A native app for Linux, macOS and Windows, written in Rust, converting both ways: Altium →
+KiCad, and KiCad → Altium (the PcbDoc, SchDocs and a .PrjPcb). Download
+`pcbferry-app-PLATFORM` from the [latest release](https://github.com/MrCloudy2/pcbferry/releases/latest)
+and start `pcbferry-app` (on macOS, `pcbferry.app`; it is not signed yet, so open it with
+right-click → Open the first time). Choose a design or drop it on the window, choose where
+the result goes, and convert. No Docker and no Python needed.
+
+The first Altium → KiCad conversion downloads the same converter engine as the plugin (about
+150 MB, once). The archive also holds `pcbferry`, the same converter on the command line, with
+the options below. The app is in [app/](app/README.md).
+
 ## Options
 
 | Option | |
