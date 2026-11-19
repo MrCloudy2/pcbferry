@@ -250,11 +250,12 @@ impl Out<'_> {
         }
     }
 
-    fn component(&mut self, s: &Symbol, lib: &LibSymbol, reference: &str) {
+    fn component(&mut self, s: &Symbol, lib: &LibSymbol, reference: &str, libref: Option<&str>) {
         let tr = symbol_transform(s);
         let place = |q: P| tr.apply(q) + s.at;
         let (orient, mirrored) = altium_orientation(tr);
-        let (lib_name, name) = s.lib_id.split_once(':').unwrap_or(("", &s.lib_id));
+        let (lib_name, own) = s.lib_id.split_once(':').unwrap_or(("", &s.lib_id));
+        let name = libref.unwrap_or(own);
         let mut c = record(1);
         c.set("LibReference", name);
         if !lib.description.is_empty() {
@@ -987,6 +988,23 @@ pub fn convert(
         out.push(p);
     }
 
+    // Altium makes one multi-part component of the parts that share a designator and a library
+    // reference. KiCad lets each unit point at its own library symbol (a rescued library has
+    // 74LS125, 74LS125_1, ... for the units of one U1), which Altium reports as duplicate
+    // designators; every unit takes the library reference of its lowest unit
+    let mut lib_of_ref: HashMap<String, (u32, String)> = HashMap::new();
+    for sym in &sch.symbols {
+        if sch.lib.get(&sym.lib_key).is_none_or(|l| l.power) {
+            continue;
+        }
+        let name = sym.lib_id.split_once(':').map_or(sym.lib_id.as_str(), |x| x.1).to_string();
+        let e = lib_of_ref
+            .entry(reference(sym, path))
+            .or_insert((sym.unit, name.clone()));
+        if sym.unit < e.0 {
+            *e = (sym.unit, name);
+        }
+    }
     let mut missing = std::collections::BTreeSet::new();
     for sym in &sch.symbols {
         let Some(lib) = sch.lib.get(&sym.lib_key) else {
@@ -1001,7 +1019,8 @@ pub fn convert(
             continue;
         }
         let r = reference(sym, path);
-        out.component(sym, lib, &r);
+        let libref = lib_of_ref.get(&r).map(|x| x.1.clone());
+        out.component(sym, lib, &r, libref.as_deref());
     }
     for m in missing {
         out.report
