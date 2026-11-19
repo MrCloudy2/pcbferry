@@ -1,0 +1,13 @@
+[package]
+name = "pcbferry-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "pcbferry"
+path = "src/main.rs"
+
+[dependencies]
+pcbferry-core = { path = "../core" }
