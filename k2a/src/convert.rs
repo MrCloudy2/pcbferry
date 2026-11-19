@@ -7,9 +7,16 @@ use crate::templates;
 
 /// Altium's y axis points up; KiCad's down. KiCad's page origin goes to this height so every
 /// coordinate stays positive, as Altium's own files are.
-const Y_FLIP: Nm = 500_000_000;
+pub(crate) const Y_FLIP: Nm = 500_000_000;
 
 const NONE16: u16 = 0xffff;
+
+/// How many pen widths KiCad's importer takes off a text's measured width (found by measuring)
+const PEN_FACTOR: f64 = 1.25;
+
+/// KiCad's widest pen for a text, as a share of its size (ClampTextPenSize)
+const PEN_CLAMP: f64 = 0.25;
+
 const MULTI_LAYER: u8 = 74;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -46,7 +53,7 @@ pub fn mech_of(name: &str) -> Option<(u16, &'static str)> {
     MECH.iter().find(|m| m.0 == name).map(|m| (m.1, m.2))
 }
 
-fn mech_layer(n: u16) -> Layer {
+pub(crate) fn mech_layer(n: u16) -> Layer {
     // Mechanical 17 and up exist only in the newer layer ids; the old byte stays at 16
     Layer {
         v6: 56 + n.min(16) as u8,
@@ -625,17 +632,61 @@ impl Ctx<'_> {
         self.doc.storage("Vias6").push(&r.0);
     }
 
-    fn text(&mut self, t: &Text, comp: u16, designator: bool, comment: bool) {
+    /// `fp`: the footprint's reference and value, which its texts may refer to
+    fn text(
+        &mut self,
+        t: &Text,
+        comp: u16,
+        designator: bool,
+        comment: bool,
+        fp: Option<(&str, &str)>,
+    ) {
         let Some(l) = self.layer(&t.layer) else {
             return;
         };
+        // KiCad's text variables for the footprint are Altium's special strings; KiCad measures
+        // (and Altium draws) them as their value
+        let (written, shown) = match fp {
+            Some((r, v)) => (
+                t.text
+                    .replace("${REFERENCE}", ".Designator")
+                    .replace("${VALUE}", ".Comment"),
+                t.text.replace("${REFERENCE}", r).replace("${VALUE}", v),
+            ),
+            None => (t.text.clone(), t.text.clone()),
+        };
+        // KiCad's markup (~{overbar}, ^{super}, _{sub}) has no Altium form: its plain text
+        let (written, shown) = (strip_markup(&written), strip_markup(&shown));
+        let t = &Text {
+            text: written,
+            ..t.clone()
+        };
         let mut b = templates::TEXT;
-        // Altium places text by the lower left of its box; KiCad by its centre. Written centred
-        // (the justification Altium has had since AD19), from an estimate of the text's width
-        let w = (t.text.chars().count() as f64 * t.height as f64 * 0.75) as Nm;
-        let local = Pt::new(if t.mirrored { w / 2 } else { -w / 2 }, t.height / 2);
+        // Altium stores the lower left corner of a text's box, and (since AD19) how the text is
+        // justified in it; KiCad its anchor. Written with KiCad's justification, the corner
+        // worked out as KiCad's importer works back from it: the box as wide as the text in
+        // KiCad's stroke font at Altium's square glyphs, less the pen, and KiCad's baseline nudge
+        // KiCad draws no pen wider than a share of the text size
+        let pen = t.thickness.min((t.height as f64 * PEN_CLAMP).round() as Nm);
+        // Altium text has a height only; its glyphs are as wide as they are high
+        let w = crate::font::text_width(&shown, t.height) - (PEN_FACTOR * pen as f64).round() as Nm;
+        let w = if t.mirrored { -w } else { w };
+        let h = t.height;
+        let dx = match t.h_justify {
+            -1 => 0,
+            1 => -w,
+            _ => -w / 2,
+        };
+        let (dy, nudge) = match t.v_justify {
+            -1 => (h, -0.0407),
+            1 => (0, 0.1225),
+            _ => (h / 2, 0.0355),
+        };
+        let local = Pt::new(dx, dy - (h as f64 * nudge).round() as Nm);
         let off = crate::kicad::rotate(local, t.rot);
         let at = Pt::new(t.at.x + off.x, t.at.y + off.y);
+        // ALTIUM_TEXT_POSITION: 1-3 left (top, centre, bottom), 4-6 centre, 7-9 right
+        let justification = (3 * (t.h_justify + 1) + (t.v_justify + 1) + 1) as u8;
         let index = self.doc.storage("Texts6").count;
         Patch(&mut b)
             .u8(0, l.v6)
@@ -653,7 +704,7 @@ impl Ctx<'_> {
             .u8(110, 0)
             .u32(115, index)
             .u8(123, 0)
-            .u8(132, 5) // centre-centre
+            .u8(132, justification)
             .u8(160, 0)
             .u32(226, l.v7)
             .u8(230, 0)
@@ -864,7 +915,7 @@ impl Ctx<'_> {
             }
         }
         // Mechanical 17 and up: the V7 layer list
-        for (i, m) in (17u16..=56).enumerate() {
+        for (i, m) in (17u16..=crate::models::BODY_BOTTOM).enumerate() {
             let k = format!("LAYERV7_{i}");
             p.num(&format!("{k}LAYERID"), 0x0102_0000u32 + m as u32);
             p.set(&format!("{k}NAME"), self.mech_name(m));
@@ -933,7 +984,11 @@ fn outline_bbox(b: &Board) -> Option<(Pt, Pt)> {
     Some((min, max))
 }
 
-pub fn convert(b: &Board, project: Option<&crate::project::Project>) -> (Doc, Report) {
+pub fn convert(
+    b: &Board,
+    project: Option<&crate::project::Project>,
+    board_dir: &std::path::Path,
+) -> (Doc, Report) {
     let mut c = Ctx {
         b,
         doc: Doc::default(),
@@ -1001,13 +1056,13 @@ pub fn convert(b: &Board, project: Option<&crate::project::Project>) -> (Doc, Re
             c.drawing(d, comp);
         }
         if let Some(t) = &fp.reference_text {
-            c.text(t, comp, true, false);
+            c.text(t, comp, true, false, Some((&fp.reference, &fp.value)));
         }
         if let Some(t) = &fp.value_text {
-            c.text(t, comp, false, true);
+            c.text(t, comp, false, true, Some((&fp.reference, &fp.value)));
         }
         for t in &fp.texts {
-            c.text(t, comp, false, false);
+            c.text(t, comp, false, false, Some((&fp.reference, &fp.value)));
         }
     }
 
@@ -1030,7 +1085,7 @@ pub fn convert(b: &Board, project: Option<&crate::project::Project>) -> (Doc, Re
         }
     }
     for t in &b.texts {
-        c.text(t, NONE16, false, false);
+        c.text(t, NONE16, false, false, None);
     }
 
     // Edge.Cuts loops inside the outline are cut-outs
@@ -1057,6 +1112,7 @@ pub fn convert(b: &Board, project: Option<&crate::project::Project>) -> (Doc, Re
         ));
     }
 
+    crate::models::write(&mut c.doc, b, board_dir, &mut c.report);
     let polygons = crate::zones::write(&mut c.doc, b, &mut c.report);
     crate::rules::write(&mut c.doc, b, project, &polygons);
     if project.is_none() {
@@ -1076,6 +1132,8 @@ pub fn convert(b: &Board, project: Option<&crate::project::Project>) -> (Doc, Re
         "Polygons6",
         "Regions6",
         "Nets6",
+        "Models",
+        "ComponentBodies6",
     ]
     .iter()
     .map(|&s| {
@@ -1112,6 +1170,24 @@ pub(crate) fn net_index(net: usize) -> i64 {
 
 pub(crate) fn v7_name(l: Layer) -> String {
     layer_name_v7(l)
+}
+
+/// KiCad's text markup as plain text: ~{X}, ^{X}, _{X} -> X
+pub(crate) fn strip_markup(s: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0;
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        match c {
+            '~' | '^' | '_' if it.peek() == Some(&'{') => {
+                it.next();
+                depth += 1;
+            }
+            '}' if depth > 0 => depth -= 1,
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 #[cfg(test)]

@@ -464,7 +464,11 @@ mod tests {
             let id = u16::from_le_bytes([d[i], d[i + 1]]);
             let n = u32::from_le_bytes(d[i + 2..i + 6].try_into().unwrap()) as usize;
             let text = String::from_utf8_lossy(&d[i + 6..i + 6 + n - 1]).into_owned();
-            let kv = text.split('|').filter_map(|f| f.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            let kv = text
+                .split('|')
+                .filter_map(|f| f.split_once('='))
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
             out.push((id, kv));
             i += 6 + n;
         }
@@ -473,7 +477,10 @@ mod tests {
 
     #[test]
     fn classes_get_rules_ahead_of_the_board() {
-        let b = Board { nets: vec!["".into(), "+5V".into(), "SIG".into()], ..Default::default() };
+        let b = Board {
+            nets: vec!["".into(), "+5V".into(), "SIG".into()],
+            ..Default::default()
+        };
         let p = crate::project::parse(
             r#"{"board": {"design_settings": {"rules": {"min_track_width": 0.15, "min_hole_to_hole": 0.25}}},
                 "net_settings": {"classes": [{"name": "Default", "clearance": 0.2, "track_width": 0.25, "via_diameter": 0.6, "via_drill": 0.3},
@@ -484,17 +491,37 @@ mod tests {
         let mut doc = Doc::default();
         write(&mut doc, &b, Some(&p), &[]);
         let r = rules(&doc);
-        let find = |name: &str| r.iter().find(|(_, kv)| kv["NAME"] == name).unwrap_or_else(|| panic!("{name}"));
+        let find = |name: &str| {
+            r.iter()
+                .find(|(_, kv)| kv["NAME"] == name)
+                .unwrap_or_else(|| panic!("{name}"))
+        };
         let (id, c) = find("Clearance_pwr");
-        assert_eq!((*id, c["SCOPE1EXPRESSION"].as_str(), c["PRIORITY"].as_str()), (0, "InNetClass('pwr')", "1"));
+        assert_eq!(
+            (*id, c["SCOPE1EXPRESSION"].as_str(), c["PRIORITY"].as_str()),
+            (0, "InNetClass('pwr')", "1")
+        );
         assert_eq!(c["GAP"], "11.811mil");
         let (_, c) = find("Clearance");
-        assert_eq!((c["SCOPE1EXPRESSION"].as_str(), c["PRIORITY"].as_str(), c["GAP"].as_str()), ("All", "2", "7.874mil"));
+        assert_eq!(
+            (
+                c["SCOPE1EXPRESSION"].as_str(),
+                c["PRIORITY"].as_str(),
+                c["GAP"].as_str()
+            ),
+            ("All", "2", "7.874mil")
+        );
         let (id, w) = find("Width_pwr");
-        assert_eq!((*id, w["PREFEREDWIDTH"].as_str(), w["MINLIMIT"].as_str()), (2, "19.685mil", "5.9055mil"));
+        assert_eq!(
+            (*id, w["PREFEREDWIDTH"].as_str(), w["MINLIMIT"].as_str()),
+            (2, "19.685mil", "5.9055mil")
+        );
         assert_eq!(find("HoleToHoleClearance").1["GAP"], "9.8425mil");
         // The class lists its nets
         let c = String::from_utf8_lossy(&doc.storages["Classes6"].data).into_owned();
-        assert!(c.contains("|NAME=pwr|KIND=0") && c.contains("|M0=+5V|") && !c.contains("SIG"), "{c}");
+        assert!(
+            c.contains("|NAME=pwr|KIND=0") && c.contains("|M0=+5V|") && !c.contains("SIG"),
+            "{c}"
+        );
     }
 }

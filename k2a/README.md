@@ -19,7 +19,14 @@ kicad2altium --check board.kicad_pcb        # read it back with KiCad and compar
 - Graphics on every layer: silkscreen, fab, courtyard, adhesive, drawings and user layers
   (User.n on Mechanical n; F.Fab, F.CrtYd and the like on Mechanical 46-56 with Altium's layer
   kinds: Assembly Top, Courtyard Top, ...)
-- Texts, centred as KiCad places them
+- Texts, justified as in KiCad (Altium has had text justification since AD19), placed from the
+  widths of KiCad's stroke font; footprint fields as Altium's designator and comment, and
+  `${REFERENCE}`/`${VALUE}` as `.Designator`/`.Comment`. Altium text has a height only, so its
+  glyphs are as wide as they are high; KiCad's markup (overbar, super- and subscript) becomes
+  plain text
+- 3D models, embedded as Altium does: the STEP files KiCad embeds in the board, or the ones it
+  finds on disk (`${KICADn_3DMODEL_DIR}`, KiCad's install, a `.step` next to a `.wrl`), each
+  stored once, with a component body per footprint at KiCad's offset and rotation
 - Copper zones as polygons, with their fill
 - Rule areas as keep-outs (vias, tracks, copper, pads)
 - Net classes (from the `.kicad_pro` next to the board: classes, patterns, assignments) as
@@ -27,15 +34,16 @@ kicad2altium --check board.kicad_pcb        # read it back with KiCad and compar
   board-wide ones, hole size, hole to hole, annular ring, board outline and silk clearance, mask
   and paste expansion, each zone's clearance and pad connection (thermal relief or direct)
 
-Not yet: 3D models, dimensions, teardrops as such, trapezoid pads (written as rectangles), rule
+Not yet: model scale (Altium has none), dimensions, teardrops as such, trapezoid pads (written as rectangles), rule
 areas that only keep out footprints, custom DRC rules (`.kicad_dru`).
 
 ## How it is tested
 
 `tests/roundtrip.rs` converts each of KiCad's demo boards, reads the PcbDoc back with KiCad's
 Altium importer (pcbferry's engine) and compares the two boards object by object: every net,
-footprint, pad, track, arc, via, zone fill, keep-out and outline loop, within 0.1 µm (Altium
-stores 2.54 nm steps). All 19 demos come back the same.
+footprint, pad, track, arc, via, zone fill, keep-out and outline loop within 0.1 µm (Altium
+stores 2.54 nm steps), every text within a third of its height, and every embedded 3D model at
+its offset and rotation. All 19 demos come back the same.
 
 ```
 KICAD_CLI=path/to/kicad-cli KICAD_DEMOS=path/to/kicad/demos cargo test --release

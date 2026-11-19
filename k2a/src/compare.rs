@@ -659,6 +659,100 @@ pub fn compare(orig: &Board, back: &Board) -> Comparison {
     };
     let (mo, mb) = (count(orig, false), count(back, true));
 
+    // Texts: board texts and footprint fields, by content and layer; placed within a third of
+    // their height (Altium keeps no anchor, only the lower left corner, and KiCad's importer
+    // measures the text again), and turned the same
+    let mut cx = Category::new("texts");
+    let texts = |b: &Board, moved: bool| {
+        let mut v: Vec<crate::kicad::Text> = b.texts.clone();
+        for f in &b.footprints {
+            v.extend(f.reference_text.iter().cloned());
+            v.extend(f.value_text.iter().cloned());
+            v.extend(f.texts.iter().cloned());
+        }
+        v.retain(|t| !t.text.is_empty() && !UNKINDED.contains(&t.layer.as_str()));
+        if moved {
+            for t in &mut v {
+                t.at = mv(t.at);
+            }
+        }
+        v
+    };
+    let (to, mut tb) = (texts(orig, true), texts(back, false));
+    // A text starting with '.' reads as an Altium special string to KiCad's importer
+    for t in to.iter().filter(|t| t.visible && !t.text.starts_with('.')) {
+        cx.total += 1;
+        let tol = (t.height / 3).max(25_000);
+        let plain = crate::convert::strip_markup(&t.text);
+        let k = tb.iter().position(|q| {
+            q.text == plain && q.layer == t.layer && near(q.at, t.at, tol) && angle_eq(q.rot, t.rot)
+        });
+        match k {
+            Some(i) => {
+                if std::env::var_os("K2A_DEBUG").is_some() {
+                    let q = &tb[i];
+                    eprintln!("text dx {} dy {}", q.at.x - t.at.x, q.at.y - t.at.y);
+                }
+                tb.swap_remove(i);
+            }
+            None => {
+                let nearest = tb
+                    .iter()
+                    .filter(|q| q.text == plain)
+                    .min_by_key(|q| (q.at.x - t.at.x).abs() + (q.at.y - t.at.y).abs());
+                cx.miss(format!(
+                    "{:?} on {} at {:?} rot {} -> {:?}",
+                    t.text,
+                    t.layer,
+                    t.at,
+                    t.rot,
+                    nearest.map(|q| (q.layer.clone(), q.at, q.rot))
+                ));
+            }
+        }
+    }
+    out.categories.push(cx);
+
+    // 3D models that the PcbDoc carries (embedded, or found on this machine): each comes back on
+    // its footprint, at the same offset and turned the same
+    let mut cm = Category::new("3d models");
+    for f in &orig.footprints {
+        let Some(g) = back
+            .footprints
+            .iter()
+            .find(|g| g.reference == f.reference && close(g.place.at, mv(f.place.at)))
+        else {
+            continue;
+        };
+        let mut gm: Vec<&crate::kicad::Model> = g.models.iter().collect();
+        for m in f.models.iter().filter(|m| !m.hide && carried(m, f, orig)) {
+            cm.total += 1;
+            let same = |a: f64, b: f64| ((a - b + 180.0).rem_euclid(360.0) - 180.0).abs() < 0.01;
+            let k = gm.iter().position(|q| {
+                (0..3).all(|i| {
+                    (q.offset[i] - m.offset[i]).abs() < 1e-4 && same(q.rotate[i], m.rotate[i])
+                })
+            });
+            match k {
+                Some(i) => {
+                    gm.remove(i);
+                }
+                None => cm.miss(format!(
+                    "{} {}: offset {:?} rotate {:?} -> {:?}",
+                    f.reference,
+                    m.path,
+                    m.offset,
+                    m.rotate,
+                    g.models
+                        .iter()
+                        .map(|q| (q.offset, q.rotate))
+                        .collect::<Vec<_>>()
+                )),
+            }
+        }
+    }
+    out.categories.push(cm);
+
     // Aperture pads (paste or mask only): something drawn there on that layer
     let mut cap = Category::new("aperture pads");
     for f in &orig.footprints {
@@ -827,4 +921,12 @@ fn aperture_at(orig: &Board, layer: &str, s: &Shape, mv: &dyn Fn(Pt) -> Pt) -> b
 fn is_aperture(p: &crate::kicad::Pad) -> bool {
     matches!(p.kind, PadKind::Smd | PadKind::Connect)
         && !p.layers.iter().any(|l| l.ends_with(".Cu"))
+}
+
+/// Whether the converter could carry a model: embedded in the board, or a STEP file it finds
+fn carried(m: &crate::kicad::Model, f: &crate::kicad::Footprint, b: &Board) -> bool {
+    match m.path.strip_prefix("kicad-embed://") {
+        Some(n) => f.embedded.contains_key(n) || b.embedded.contains_key(n),
+        None => false,
+    }
 }

@@ -78,6 +78,23 @@ impl Parser<'_> {
                 }
             }
             Some(b')') => Err(self.err("unexpected ')'")),
+            Some(b'|') => {
+                // |...|: a long value over several lines (embedded files), whitespace not part of it
+                self.i += 1;
+                let start = self.i;
+                while self.i < self.s.len() && self.s[self.i] != b'|' {
+                    self.i += 1;
+                }
+                if self.i == self.s.len() {
+                    return Err(self.err("unclosed |"));
+                }
+                let v: String = String::from_utf8_lossy(&self.s[start..self.i])
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .collect();
+                self.i += 1;
+                Ok(Sexpr::Str(v))
+            }
             Some(b'"') => {
                 self.i += 1;
                 let mut out = Vec::new();
@@ -216,6 +233,12 @@ mod tests {
         assert_eq!(v.arg_num("version", 0), Some(20260206.0));
         assert_eq!(v.arg_text("net", 0), Some("a \"b\""));
         assert_eq!(v.arg_num("at", 1), Some(-2.0));
+    }
+
+    #[test]
+    fn bar_delimited_values() {
+        let v = parse("(data |KLUv\n  /aBn|)").unwrap();
+        assert_eq!(v.args()[0].text(), Some("KLUv/aBn"));
     }
 
     #[test]

@@ -3,8 +3,10 @@
 pub mod altium;
 pub mod compare;
 pub mod convert;
+pub mod font;
 pub mod geom;
 pub mod kicad;
+pub mod models;
 pub mod outline;
 pub mod project;
 pub mod rules;
@@ -27,7 +29,8 @@ pub fn convert_file(
         Ok(t) => Some(project::parse(&t).map_err(|e| format!("{}: {e}", pro.display()))?),
         Err(_) => None,
     };
-    let (doc, report) = convert::convert(&board, project.as_ref());
+    let dir = input.parent().unwrap_or(Path::new("."));
+    let (doc, report) = convert::convert(&board, project.as_ref(), dir);
     doc.write(output)?;
     Ok(report)
 }

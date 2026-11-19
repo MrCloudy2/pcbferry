@@ -164,9 +164,28 @@ pub struct Text {
     pub at: Pt,
     pub rot: f64,
     pub height: Nm,
+    /// Glyph width (KiCad's text size is height then width)
+    pub width: Nm,
     pub thickness: Nm,
     pub mirrored: bool,
     pub visible: bool,
+    /// -1 left, 0 centre, 1 right
+    pub h_justify: i8,
+    /// -1 top, 0 centre, 1 bottom
+    pub v_justify: i8,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Model {
+    /// As written: a path with ${VARIABLES}, or kicad-embed://name
+    pub path: String,
+    /// mm, KiCad's 3D frame (y up)
+    pub offset: [f64; 3],
+    pub scale: [f64; 3],
+    /// Degrees
+    pub rotate: [f64; 3],
+    pub hide: bool,
+    pub opacity: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -183,6 +202,9 @@ pub struct Footprint {
     pub texts: Vec<Text>,
     pub reference_text: Option<Text>,
     pub value_text: Option<Text>,
+    pub models: Vec<Model>,
+    /// Files embedded in the footprint: name -> base64 of zstd
+    pub embedded: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -229,6 +251,8 @@ pub struct Board {
     pub drawings: Vec<Drawing>,
     pub texts: Vec<Text>,
     pub zones: Vec<Zone>,
+    /// Files embedded in the board: name -> base64 of zstd
+    pub embedded: HashMap<String, String>,
 }
 
 #[derive(Debug)]
@@ -432,18 +456,34 @@ fn text(e: &Sexpr, value: &str, place: Option<&Placement>) -> Option<Text> {
     let rot = a.get(2).and_then(|v| v.num()).unwrap_or(0.0);
     let font = e.child("effects").and_then(|f| f.child("font"));
     let height = font
-        .and_then(|f| f.arg_num("size", 1))
+        .and_then(|f| f.arg_num("size", 0))
         .map(mm)
         .unwrap_or(1_000_000);
+    let width = font
+        .and_then(|f| f.arg_num("size", 1))
+        .map(mm)
+        .unwrap_or(height);
     let thickness = font
         .and_then(|f| f.arg_num("thickness", 0))
         .map(mm)
         .unwrap_or(height / 8);
-    let mirrored = e
-        .child("effects")
-        .and_then(|f| f.child("justify"))
-        .map(|j| j.has_atom("mirror"))
-        .unwrap_or(false);
+    let justify = e.child("effects").and_then(|f| f.child("justify"));
+    let has = |w: &str| justify.map(|j| j.has_atom(w)).unwrap_or(false);
+    let mirrored = has("mirror");
+    let h_justify = if has("left") {
+        -1
+    } else if has("right") {
+        1
+    } else {
+        0
+    };
+    let v_justify = if has("top") {
+        -1
+    } else if has("bottom") {
+        1
+    } else {
+        0
+    };
     let hidden = e.has_atom("hide")
         || e.flag("hide").unwrap_or(false)
         || e.child("effects")
@@ -456,9 +496,12 @@ fn text(e: &Sexpr, value: &str, place: Option<&Placement>) -> Option<Text> {
         // Footprint texts store their angle including the footprint's (KiCad 6 and later)
         rot,
         height,
+        width,
         thickness,
         mirrored,
         visible: !hidden,
+        h_justify,
+        v_justify,
     })
 }
 
@@ -566,6 +609,8 @@ fn footprint(e: &Sexpr, nets: &mut Nets) -> Option<Footprint> {
         texts: Vec::new(),
         reference_text: None,
         value_text: None,
+        models: Vec::new(),
+        embedded: HashMap::new(),
     };
     for c in e.args() {
         match c.head() {
@@ -611,10 +656,45 @@ fn footprint(e: &Sexpr, nets: &mut Nets) -> Option<Footprint> {
                 }
             }
             Some(h) if h.starts_with("fp_") => fp.drawings.extend(graphic(c, Some(&place), nets)),
+            Some("model") => fp.models.extend(model(c)),
+            Some("embedded_files") => fp.embedded.extend(embedded_files(c)),
             _ => {}
         }
     }
     Some(fp)
+}
+
+fn xyz(e: &Sexpr, name: &str, default: f64) -> [f64; 3] {
+    let v = e.child(name).and_then(|c| c.child("xyz"));
+    let n = |i: usize| {
+        v.and_then(|x| x.args().get(i))
+            .and_then(|a| a.num())
+            .unwrap_or(default)
+    };
+    [n(0), n(1), n(2)]
+}
+
+fn model(e: &Sexpr) -> Option<Model> {
+    Some(Model {
+        path: e.args().first()?.text()?.to_string(),
+        offset: xyz(e, "offset", 0.0),
+        scale: xyz(e, "scale", 1.0),
+        rotate: xyz(e, "rotate", 0.0),
+        hide: e.has_atom("hide") || e.flag("hide").unwrap_or(false),
+        opacity: e.arg_num("opacity", 0).unwrap_or(1.0),
+    })
+}
+
+/// `(embedded_files (file (name ..) (type ..) (data |..|)) ...)`: name -> data, where present
+fn embedded_files(e: &Sexpr) -> Vec<(String, String)> {
+    e.children("file")
+        .filter_map(|f| {
+            Some((
+                f.arg_text("name", 0)?.to_string(),
+                f.arg_text("data", 0)?.to_string(),
+            ))
+        })
+        .collect()
 }
 
 fn zone(e: &Sexpr, nets: &mut Nets) -> Zone {
@@ -774,6 +854,7 @@ pub fn read(source: &str) -> Result<Board, Box<dyn std::error::Error>> {
             }
             Some("footprint") | Some("module") => b.footprints.extend(footprint(e, &mut nets)),
             Some("zone") => b.zones.push(zone(e, &mut nets)),
+            Some("embedded_files") => b.embedded.extend(embedded_files(e)),
             Some("gr_text") => {
                 if let Some(t) = e.args().first().and_then(|v| v.text()) {
                     b.texts.extend(text(e, t, None));

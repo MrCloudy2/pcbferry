@@ -71,6 +71,8 @@ fn assert_copper(c: &compare::Comparison) {
         "zone fills",
         "keepouts",
         "outline",
+        "texts",
+        "3d models",
     ] {
         let cat = c.get(name);
         assert!(
@@ -153,6 +155,8 @@ fn all_demos() {
             "zone fills",
             "keepouts",
             "outline",
+            "texts",
+            "3d models",
         ]
         .into_iter()
         .filter(|n| !c.get(n).ok())

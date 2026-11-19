@@ -159,6 +159,7 @@ impl Storage {
 #[derive(Default)]
 pub struct Doc {
     pub storages: BTreeMap<String, Storage>,
+    /// Streams outside the Header/Data pairs, by path ("FileHeader", "Models/0")
     pub streams: BTreeMap<String, Vec<u8>>,
 }
 
@@ -169,15 +170,20 @@ impl Doc {
 
     pub fn write(&self, path: &std::path::Path) -> std::io::Result<()> {
         let mut cf = cfb::create(path)?;
-        for (name, data) in &self.streams {
-            cf.create_stream(format!("/{name}"))?.write_all(data)?;
-        }
         for (name, st) in &self.storages {
             cf.create_storage(format!("/{name}"))?;
             cf.create_stream(format!("/{name}/Header"))?
                 .write_all(&st.count.to_le_bytes())?;
             cf.create_stream(format!("/{name}/Data"))?
                 .write_all(&st.data)?;
+        }
+        for (name, data) in &self.streams {
+            if let Some((dir, _)) = name.rsplit_once('/') {
+                if !cf.exists(format!("/{dir}")) {
+                    cf.create_storage(format!("/{dir}"))?;
+                }
+            }
+            cf.create_stream(format!("/{name}"))?.write_all(data)?;
         }
         cf.flush()
     }
