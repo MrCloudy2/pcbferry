@@ -52,6 +52,16 @@ for f in $(machos); do
     done
 done
 
+# dylibbundler adds its rpath even where KiCad's build already put it, and macOS refuses to
+# load a library with the same LC_RPATH twice: keep one of each
+for f in $(machos); do
+    otool -l "$f" | awk '/cmd LC_RPATH/{r=1} r&&/ path /{print $2; r=0}' | sort | uniq -d | while read -r rp; do
+        while [ "$(otool -l "$f" | awk -v p="$rp" '/cmd LC_RPATH/{r=1} r&&/ path /{if($2==p)n++; r=0} END{print n+0}')" -gt 1 ]; do
+            install_name_tool -delete_rpath "$rp" "$f"
+        done
+    done
+done
+
 # Each bundled library names itself by where it now is (otool -L lists that name too)
 for f in "$app"/Frameworks/*.dylib; do
     install_name_tool -id "@executable_path/../Frameworks/$(basename "$f")" "$f"
