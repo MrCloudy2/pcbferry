@@ -36,3 +36,56 @@ pub fn convert_file(
     doc.write(output)?;
     Ok(report)
 }
+
+/// What converting a whole KiCad project wrote
+pub struct ProjectReport {
+    pub board: Option<(std::path::PathBuf, convert::Report)>,
+    pub schematic: Option<sch::Report>,
+    pub project: std::path::PathBuf,
+}
+
+/// Convert a KiCad project (.kicad_pro): its board and its schematic, into `out_dir`, with an
+/// Altium project (.PrjPcb) holding them all
+pub fn convert_project(
+    pro: &Path,
+    out_dir: &Path,
+) -> Result<ProjectReport, Box<dyn std::error::Error>> {
+    let name = pro
+        .file_stem()
+        .ok_or("no project name")?
+        .to_string_lossy()
+        .to_string();
+    std::fs::create_dir_all(out_dir)?;
+    let pcb = pro.with_extension("kicad_pcb");
+    let board = if pcb.exists() {
+        let out = out_dir.join(format!("{name}.PcbDoc"));
+        let r = convert_file(&pcb, &out).map_err(|e| format!("{}: {e}", pcb.display()))?;
+        Some((out, r))
+    } else {
+        None
+    };
+    let root = pro.with_extension("kicad_sch");
+    let schematic = if root.exists() {
+        let out = out_dir.join(format!("{name}.SchDoc"));
+        Some(sch::convert_file(&root, &out).map_err(|e| format!("{}: {e}", root.display()))?)
+    } else {
+        None
+    };
+    let mut docs: Vec<&Path> = Vec::new();
+    if let Some(s) = &schematic {
+        docs.extend(s.sheets.iter().map(|(p, _)| p.as_path()));
+    }
+    if let Some((p, _)) = &board {
+        docs.push(p);
+    }
+    if docs.is_empty() {
+        return Err(format!("{}: no board or schematic next to it", pro.display()).into());
+    }
+    let project = out_dir.join(format!("{name}.PrjPcb"));
+    sch::write_project(&project, &docs)?;
+    Ok(ProjectReport {
+        board,
+        schematic,
+        project,
+    })
+}

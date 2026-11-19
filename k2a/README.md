@@ -5,6 +5,7 @@ pcbferry's other direction: a KiCad board (`.kicad_pcb`) as an Altium Designer P
 written natively. No Gerbers or netlists in between.
 
 ```
+kicad2altium project.kicad_pro [out-dir]   # board, every sheet and a .PrjPcb holding them
 kicad2altium board.kicad_pcb [out.PcbDoc]
 kicad2altium --check board.kicad_pcb        # read it back with KiCad and compare
 kicad2altium project.kicad_sch [out.SchDoc] # the root sheet: every sheet below it too

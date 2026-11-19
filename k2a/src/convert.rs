@@ -741,6 +741,15 @@ fn component(fp: &Footprint, index: usize) -> Vec<u8> {
     let mut p = Props::new();
     p.set("LAYER", if fp.back { "BOTTOM" } else { "TOP" });
     p.bool("LOCKED", fp.locked);
+    // Altium's component type: Standard, Standard (No BOM) or Graphical (board only)
+    let kind = match (fp.board_only, fp.exclude_from_bom) {
+        (true, _) => 2,
+        (false, true) => 5,
+        _ => 0,
+    };
+    if kind != 0 {
+        p.num("COMPONENTKIND", kind);
+    }
     p.bool("POLYGONOUTLINE", false);
     p.bool("USERROUTED", true);
     p.bool("KEEPOUT", false);

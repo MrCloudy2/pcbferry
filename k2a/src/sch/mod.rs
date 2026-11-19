@@ -98,13 +98,19 @@ pub fn convert_file(input: &Path, output: &Path) -> Result<Report, Box<dyn std::
     }
     if report.sheets.len() > 1 {
         let prj = output.with_extension("PrjPcb");
-        let mut text = String::from("[Design]\r\nVersion=1.0\r\n");
-        for (i, (p, _)) in report.sheets.iter().enumerate() {
-            let n = p.file_name().unwrap_or_default().to_string_lossy();
-            text += &format!("\r\n[Document{}]\r\nDocumentPath={n}\r\n", i + 1);
-        }
-        std::fs::write(&prj, text)?;
+        let docs: Vec<&Path> = report.sheets.iter().map(|(p, _)| p.as_path()).collect();
+        write_project(&prj, &docs)?;
         report.project = Some(prj);
     }
     Ok(report)
+}
+
+/// An Altium project listing these documents (paths relative to the project's folder)
+pub fn write_project(prj: &Path, docs: &[&Path]) -> std::io::Result<()> {
+    let mut text = String::from("[Design]\r\nVersion=1.0\r\n");
+    for (i, p) in docs.iter().enumerate() {
+        let n = p.file_name().unwrap_or_default().to_string_lossy();
+        text += &format!("\r\n[Document{}]\r\nDocumentPath={n}\r\n", i + 1);
+    }
+    std::fs::write(prj, text)
 }

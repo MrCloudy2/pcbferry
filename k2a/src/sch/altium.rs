@@ -280,8 +280,8 @@ impl Out<'_> {
             .set("PartIDLocked", "F")
             .set("DesignItemId", name);
         if !s.in_bom || !s.on_board {
-            // Standard (no BOM) or Graphical
-            c.num("ComponentKind", if s.on_board { 3 } else { 2 });
+            // Standard (no BOM) = 5, Graphical (neither board nor BOM) = 2
+            c.num("ComponentKind", component_kind(s.in_bom, s.on_board));
         }
         let ci = self.push(c);
         self.report.components += 1;
@@ -839,6 +839,22 @@ fn aliases_expand_in_bus_labels() {
     assert_eq!(expand_alias("I2C_{CAM}{I2C}", &a), "I2C_{CAM}{SDA SCL}");
     assert_eq!(expand_alias("X_{I2C}", &a), "X_{I2C}");
     assert_eq!(expand_alias("D[0..7]", &a), "D[0..7]");
+}
+
+/// Altium's component kind for KiCad's "in BOM" and "on board"
+fn component_kind(in_bom: bool, on_board: bool) -> i32 {
+    match (in_bom, on_board) {
+        (true, true) => 0,
+        (false, true) => 5,
+        _ => 2,
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn kinds_are_altiums() {
+    assert_eq!(component_kind(false, true), 5); // not a net tie (3)
+    assert_eq!(component_kind(true, false), 2);
 }
 
 fn line_width(w: Iu) -> i32 {

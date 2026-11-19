@@ -1,8 +1,12 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-const USAGE: &str = "usage: kicad2altium [--check] BOARD.kicad_pcb [OUT.PcbDoc]
+const USAGE: &str = "usage: kicad2altium PROJECT.kicad_pro [OUT_DIR]
+       kicad2altium [--check] BOARD.kicad_pcb [OUT.PcbDoc]
        kicad2altium [--check] SHEET.kicad_sch [OUT.SchDoc]
+
+A project becomes an Altium project: its board, every sheet, and a .PrjPcb holding them
+(OUT_DIR defaults to NAME-altium next to the project).
 
 Writes the board as an Altium Designer PCB (binary PcbDoc), or the schematic sheet as an
 Altium schematic (binary SchDoc). Without OUT, next to the input.
@@ -23,6 +27,39 @@ fn main() -> ExitCode {
     let check = args.iter().any(|a| a == "--check");
     args.retain(|a| a != "--check");
     let input = PathBuf::from(&args[0]);
+    if input.extension().is_some_and(|e| e == "kicad_pro") {
+        let out = args.get(1).map(PathBuf::from).unwrap_or_else(|| {
+            let stem = input.file_stem().unwrap_or_default().to_string_lossy();
+            input.with_file_name(format!("{stem}-altium"))
+        });
+        return match pcbferry_k2a::convert_project(&input, &out) {
+            Ok(r) => {
+                if let Some((p, b)) = &r.board {
+                    println!(
+                        "board -> {}: {} objects",
+                        p.display(),
+                        b.counts.iter().map(|(_, n)| n).sum::<usize>()
+                    );
+                    for w in &b.warnings {
+                        println!("  note: {w}");
+                    }
+                }
+                if let Some(s) = &r.schematic {
+                    let comps: usize = s.sheets.iter().map(|(_, r)| r.components).sum();
+                    println!("schematic -> {} sheets, {comps} components", s.sheets.len());
+                    for w in s.sheets.iter().flat_map(|(_, r)| &r.warnings) {
+                        println!("  note: {w}");
+                    }
+                }
+                println!("project: {}", r.project.display());
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("kicad2altium: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     if input.extension().is_some_and(|e| e == "kicad_sch") {
         return schematic(&input, args.get(1).map(PathBuf::from), check);
     }

@@ -196,6 +196,9 @@ pub struct Footprint {
     pub place: Placement,
     pub back: bool,
     pub locked: bool,
+    /// `(attr ... exclude_from_bom board_only)`
+    pub exclude_from_bom: bool,
+    pub board_only: bool,
     pub pads: Vec<Pad>,
     /// Graphics, already at their place on the board
     pub drawings: Vec<Drawing>,
@@ -604,6 +607,10 @@ fn footprint(e: &Sexpr, nets: &mut Nets) -> Option<Footprint> {
         place,
         back,
         locked: e.has_atom("locked") || e.flag("locked").unwrap_or(false),
+        exclude_from_bom: e
+            .child("attr")
+            .is_some_and(|a| a.has_atom("exclude_from_bom")),
+        board_only: e.child("attr").is_some_and(|a| a.has_atom("board_only")),
         pads: Vec::new(),
         drawings: Vec::new(),
         texts: Vec::new(),
