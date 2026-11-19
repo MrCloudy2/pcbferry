@@ -9,6 +9,8 @@ Used by the harness (facts from altium_monkey) and, as pcbferry_dru.py, by the p
 converter: `custom_rules(pcbdoc)` reads everything it needs from the PcbDoc (olefile).
 """
 
+from __future__ import annotations
+
 import re
 
 MIL = 0.0254

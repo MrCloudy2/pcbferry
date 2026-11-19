@@ -13,6 +13,8 @@ import-reports/ with kicad-cli's JSON reports plus a summary.json. Exit status
 is non-zero if any step fails.
 """
 
+from __future__ import annotations
+
 import argparse
 import configparser
 import json

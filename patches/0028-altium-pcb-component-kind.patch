@@ -1,0 +1,43 @@
+diff --git a/pcbnew/pcb_io/altium/altium_parser_pcb.cpp b/pcbnew/pcb_io/altium/altium_parser_pcb.cpp
+index 5bdd494..0964241 100644
+--- a/pcbnew/pcb_io/altium/altium_parser_pcb.cpp
++++ b/pcbnew/pcb_io/altium/altium_parser_pcb.cpp
+@@ -698,6 +698,7 @@ ACOMPONENT6::ACOMPONENT6( ALTIUM_BINARY_PARSER& aReader )
+     locked           = ALTIUM_PROPS_UTILS::ReadBool( props, wxT( "LOCKED" ), false );
+     nameon           = ALTIUM_PROPS_UTILS::ReadBool( props, wxT( "NAMEON" ), true );
+     commenton        = ALTIUM_PROPS_UTILS::ReadBool( props, wxT( "COMMENTON" ), false );
++    componentkind    = ALTIUM_PROPS_UTILS::ReadInt( props, wxT( "COMPONENTKIND" ), 0 );
+     sourcedesignator = ALTIUM_PROPS_UTILS::ReadString( props, wxT( "SOURCEDESIGNATOR" ), wxT( "" ) );
+ 
+     sourceUniqueID = ALTIUM_PROPS_UTILS::ReadString( props, wxT( "SOURCEUNIQUEID" ), wxT( "" ) );
+diff --git a/pcbnew/pcb_io/altium/altium_parser_pcb.h b/pcbnew/pcb_io/altium/altium_parser_pcb.h
+index 236b80d..5d62aa5 100644
+--- a/pcbnew/pcb_io/altium/altium_parser_pcb.h
++++ b/pcbnew/pcb_io/altium/altium_parser_pcb.h
+@@ -557,6 +557,7 @@ struct ACOMPONENT6
+     bool         locked;
+     bool         nameon;
+     bool         commenton;
++    int          componentkind; // 0 standard, 1 mechanical, 2 graphical, 3/4 net tie, 5 no BOM
+     wxString     sourceUniqueID;
+     wxString     sourceHierachicalPath;
+     wxString     sourcedesignator;
+diff --git a/pcbnew/pcb_io/altium/altium_pcb.cpp b/pcbnew/pcb_io/altium/altium_pcb.cpp
+index 82c07de..42b35f9 100644
+--- a/pcbnew/pcb_io/altium/altium_pcb.cpp
++++ b/pcbnew/pcb_io/altium/altium_pcb.cpp
+@@ -2076,6 +2076,14 @@ void ALTIUM_PCB::ParseComponents6Data( const ALTIUM_PCB_COMPOUND_FILE& aAltiumPc
+         footprint->SetSheetfile( elem.sourceHierachicalPath + wxT( ".kicad_sch" ));
+ 
+         footprint->SetLocked( elem.locked );
++
++        // Altium's component type: Graphical is on the board only, and it, Net Tie (No BOM)
++        // and Standard (No BOM) stay out of the bill of materials
++        if( elem.componentkind == 2 )
++            footprint->SetAttributes( footprint->GetAttributes() | FP_BOARD_ONLY );
++
++        if( elem.componentkind == 2 || elem.componentkind == 4 || elem.componentkind == 5 )
++            footprint->SetAttributes( footprint->GetAttributes() | FP_EXCLUDE_FROM_BOM );
+         footprint->Reference().SetVisible( elem.nameon );
+         footprint->Value().SetVisible( elem.commenton );
+         footprint->SetLayer( elem.layer == ALTIUM_LAYER::TOP_LAYER ? F_Cu : B_Cu );
