@@ -190,10 +190,20 @@ fn record(kind: i32) -> Props {
     p
 }
 
-/// Altium's eight-letter unique ids, derived from KiCad's uuid so a conversion is repeatable
+thread_local! {
+    /// The sheet instance being written: part of every unique id, so that the copies of a sheet
+    /// used more than once do not share their ids
+    static INSTANCE: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// Altium's eight-letter unique ids, derived from KiCad's uuid and the sheet instance so a
+/// conversion is repeatable. Altium Designer gives a component whose id another component in the
+/// project already has a new one, and then asks to save the sheet: with KiCad's uuid alone,
+/// every copy of a sheet used twice had the same ids
 fn unique_id(seed: &str) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in seed.bytes() {
+    let instance = INSTANCE.with(|i| i.borrow().clone());
+    for b in instance.bytes().chain(seed.bytes()) {
         h = (h ^ b as u64).wrapping_mul(0x100_0000_01b3);
     }
     (0..8)
@@ -912,6 +922,7 @@ pub fn convert(
     hierarchical: bool,
     aliases: &HashMap<String, Vec<String>>,
 ) -> (Doc, Report) {
+    INSTANCE.with(|i| *i.borrow_mut() = path.to_string());
     let sh = sheet(sch);
     let mut out = Out {
         recs: Vec::new(),
