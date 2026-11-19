@@ -1,4 +1,5 @@
-//! pcbferry's reverse direction: a KiCad board (.kicad_pcb) as an Altium PcbDoc.
+//! pcbferry's reverse direction: a KiCad board (.kicad_pcb) as an Altium PcbDoc, and a
+//! KiCad schematic (.kicad_sch) as an Altium SchDoc.
 
 pub mod altium;
 pub mod compare;
@@ -10,6 +11,7 @@ pub mod models;
 pub mod outline;
 pub mod project;
 pub mod rules;
+pub mod sch;
 pub mod sexpr;
 mod templates;
 pub mod zones;

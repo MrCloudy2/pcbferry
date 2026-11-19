@@ -2,11 +2,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 const USAGE: &str = "usage: kicad2altium [--check] BOARD.kicad_pcb [OUT.PcbDoc]
+       kicad2altium [--check] SHEET.kicad_sch [OUT.SchDoc]
 
-Writes the board as an Altium Designer PCB (binary PcbDoc). Without OUT, next to the input.
+Writes the board as an Altium Designer PCB (binary PcbDoc), or the schematic sheet as an
+Altium schematic (binary SchDoc). Without OUT, next to the input.
 
-  --check   read the PcbDoc back with KiCad's Altium importer (kicad-cli, or $KICAD_CLI)
-            and compare it with the board, object by object";
+  --check   read the result back with KiCad's Altium importer (kicad-cli, or $KICAD_CLI)
+            and compare: a board object by object, a schematic by its netlist";
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -21,6 +23,9 @@ fn main() -> ExitCode {
     let check = args.iter().any(|a| a == "--check");
     args.retain(|a| a != "--check");
     let input = PathBuf::from(&args[0]);
+    if input.extension().is_some_and(|e| e == "kicad_sch") {
+        return schematic(&input, args.get(1).map(PathBuf::from), check);
+    }
     let output = args
         .get(1)
         .map(PathBuf::from)
@@ -60,9 +65,7 @@ fn main() -> ExitCode {
 }
 
 fn run_check(input: &Path, doc: &Path) -> Result<bool, Box<dyn std::error::Error>> {
-    let cli = std::env::var_os("KICAD_CLI")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| "kicad-cli".into());
+    let cli = kicad_cli();
     let dir = std::env::temp_dir().join(format!("kicad2altium-check-{}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
     let back = dir.join("back.kicad_pcb");
@@ -92,4 +95,67 @@ fn run_check(input: &Path, doc: &Path) -> Result<bool, Box<dyn std::error::Error
         }
     }
     Ok(c.categories.iter().all(|c| c.ok()))
+}
+
+fn kicad_cli() -> PathBuf {
+    std::env::var_os("KICAD_CLI")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| "kicad-cli".into())
+}
+
+fn schematic(input: &Path, output: Option<PathBuf>, check: bool) -> ExitCode {
+    let output = output.unwrap_or_else(|| input.with_extension("SchDoc"));
+    let report = match pcbferry_k2a::sch::convert_file(input, &output) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("kicad2altium: {}: {e}", input.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    for (path, r) in &report.sheets {
+        println!(
+            "{} -> {}: {} components, {} power ports, {} wires, {} labels",
+            input.display(),
+            path.display(),
+            r.components,
+            r.power_ports,
+            r.wires,
+            r.labels
+        );
+        for w in &r.warnings {
+            println!("  note: {w}");
+        }
+    }
+    if let Some(p) = &report.project {
+        println!("project: {}", p.display());
+    }
+    if !check {
+        return ExitCode::SUCCESS;
+    }
+    match pcbferry_k2a::sch::check::roundtrip(&kicad_cli(), input, &output) {
+        Ok(d) => {
+            println!(
+                "check: {} components, {} nets: {}",
+                d.components,
+                d.nets,
+                if d.ok() {
+                    "same".to_string()
+                } else {
+                    format!("{} differences", d.problems.len())
+                }
+            );
+            for p in d.problems.iter().take(40) {
+                println!("  {p}");
+            }
+            if d.ok() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
+        }
+        Err(e) => {
+            eprintln!("kicad2altium: check: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }

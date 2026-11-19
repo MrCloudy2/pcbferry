@@ -67,7 +67,7 @@ jobs:
           cargo test --release --lib
           cargo build --release
 
-      - name: KiCad's demo boards as PcbDocs
+      - name: KiCad's demos as PcbDocs and SchDocs
         run: |
           tag=$(sed -n 's/^ARG KICAD_TAG=//p' ../Containerfile)
           git clone -q --depth 1 --branch "$tag" --filter=blob:none --sparse https://gitlab.com/kicad/code/kicad.git ../kicad
@@ -77,6 +77,14 @@ jobs:
             name=$(basename "${f%.kicad_pcb}")
             cp "$f" "../out/$name.kicad_pcb"
             ./target/release/kicad2altium "$f" "../out/$name.PcbDoc"
+          done
+          # Each project's schematic, in a folder of its own: a hierarchy is several SchDocs
+          find ../kicad/demos -name '*.kicad_pro' -print0 | while IFS= read -r -d '' p; do
+            sch="${p%.kicad_pro}.kicad_sch"
+            [ -f "$sch" ] || continue
+            name=$(basename "${p%.kicad_pro}")
+            mkdir -p "../out/$name-sch"
+            ./target/release/kicad2altium "$sch" "../out/$name-sch/$name.SchDoc"
           done
 
       - uses: actions/upload-artifact@v4
@@ -171,6 +179,8 @@ jobs:
           cd k2a
           KICAD_CLI=$PWD/../engine/pcbferry-engine/bin/kicad-cli KICAD_DEMOS=$PWD/../kicad-demos/demos \
             cargo test --release --test roundtrip -- --nocapture --test-threads 2
+          KICAD_CLI=$PWD/../engine/pcbferry-engine/bin/kicad-cli KICAD_DEMOS=$PWD/../kicad-demos/demos \
+            cargo test --release --test schematics -- --nocapture --test-threads 2
 
       - uses: actions/upload-artifact@v4
         with:

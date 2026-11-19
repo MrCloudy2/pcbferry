@@ -47,6 +47,22 @@ Start small and go up: `ecc83-pp_v2`, `pic_programmer`, `StickHub`, `video`, `vm
    The ASCII file lists every record with every field Altium writes; comparing it with ours shows
    exactly what Altium fills in or changes.
 
+## Schematics
+
+The artifact also holds each demo project's schematic, in `<project>-sch/`: one SchDoc per sheet
+and a `.PrjPcb`. Open the `.PrjPcb` (start with `ecc83-pp_v2`, then `pic_programmer`,
+`complex_hierarchy`, `video`, `vme-wren`), and for each:
+
+1. **Open**: every dialog or message, word for word.
+2. **Look** at each sheet: symbols drawn and placed right (rotated, mirrored), pins at the wire
+   ends, wires, buses, labels, power ports, sheet symbols with their entries.
+3. **Compile** (Project » Validate PCB Project): the Messages panel, especially unconnected
+   pins, nets with one pin, duplicate designators.
+4. **Navigator** after compiling: the number of components and nets, against what
+   `kicad2altium` printed.
+5. **Save** one sheet back as binary and as ASCII (`<sheet>.altium-saved.SchDoc`,
+   `<sheet>.altium-ascii.SchDoc`).
+
 ## Send the results back
 
 On a branch `altium-check-results` of MrCloudy2/pcbferry, under `k2a/altium-check/<board>/`:
