@@ -1,6 +1,6 @@
 # Pull requests and main: fast checks, then build the image and convert real Altium
-# projects with it. On a v* tag also push the image to GHCR and attach the
-# corresponding source (patched KiCad tree + patches) to a release.
+# projects with it. On a v* tag also build the macOS and Windows engines, push the image to
+# GHCR, and release the plugin (with every engine) and the corresponding source.
 name: ci
 
 on:
@@ -150,13 +150,73 @@ jobs:
             docker push "$IMAGE:$tag"
           done
 
-      - name: Release with source
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Corresponding source for the release
+        if: (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
+        run: |
+          mkdir -p release
+          tar -C source -czf release/pcbferry-patches.tar.gz patches SOURCE.txt
+          cp source/kicad-*-pcbferry-source.tar.xz release/
+
+      - uses: actions/upload-artifact@v4
+        if: (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
+        with:
+          name: release-source
+          path: release/
+          retention-days: 7
+
+  engine-macos:
+    needs: checks
+    if: (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
+    uses: ./.github/workflows/engine-macos.yml
+
+  engine-windows:
+    needs: checks
+    if: (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
+    uses: ./.github/workflows/engine-windows.yml
+
+  release:
+    needs: [build, engine-macos, engine-windows]
+    if: (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: kicad-plugin
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: engine-macos
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: engine-windows
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-source
+          path: dist
+
+      - name: Plugin with every engine, and the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          tar -C source -czf pcbferry-patches.tar.gz patches SOURCE.txt
+          set -euo pipefail
+          version=$(python3 pcbferry --version | awk '{print $2}')
+          if [[ $GITHUB_REF == refs/tags/v* ]]; then version=${GITHUB_REF_NAME#v}; fi
+          rm -f dist/pcbferry-kicad-plugin-*.zip
+          python3 plugin/package.py --version "$version" --out dist \
+            --engine linux-x86_64=dist/pcbferry-engine-linux-x86_64.tar.xz \
+            --engine macos-arm64=dist/pcbferry-engine-macos-arm64.tar.xz \
+            --engine windows-x86_64=dist/pcbferry-engine-windows-x86_64.tar.xz
+          python3 -I -c "import json,zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); f=json.loads(z.read('plugins/engine.json'))['files']; assert len(f)==3, f; print(sorted(f))" \
+            "dist/pcbferry-kicad-plugin-$version.zip"
+          # A manual run (workflow_dispatch) stops here: it checks the release without making one
+          if [[ $GITHUB_REF != refs/tags/v* ]]; then ls -l dist; exit 0; fi
           gh release create "$GITHUB_REF_NAME" --generate-notes \
-            source/kicad-*-pcbferry-source.tar.xz pcbferry-patches.tar.gz \
-            dist/pcbferry-kicad-plugin-*.zip dist/pcbferry-engine-*.tar.xz \
+            dist/kicad-*-pcbferry-source.tar.xz dist/pcbferry-patches.tar.gz \
+            "dist/pcbferry-kicad-plugin-$version.zip" dist/pcbferry-engine-*.tar.xz \
             dist/packages.json dist/repository.json
