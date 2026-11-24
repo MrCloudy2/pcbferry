@@ -309,7 +309,7 @@ pub fn convert(
     opts: &Options,
     log: Log,
 ) -> Result<Outcome, Refused> {
-    let src = std::path::absolute(input).map_err(|e| Refused(e.to_string()))?;
+    let src = altium::resolve(input).map_err(|e| Refused(e.to_string()))?;
     if !src.is_file() {
         return Err(Refused(format!("{}: no such file", input.display())));
     }
@@ -322,7 +322,7 @@ pub fn convert(
                 input.display()
             ))
         })?;
-    let out = std::path::absolute(out).map_err(|e| Refused(e.to_string()))?;
+    let out = altium::resolve(out).map_err(|e| Refused(e.to_string()))?;
     if out.read_dir().is_ok_and(|mut d| d.next().is_some()) && !opts.force {
         return Err(Refused(format!("{} is not empty", out.display())));
     }
@@ -353,7 +353,7 @@ pub fn convert(
             }
             // sch_src is the project itself: import the whole project (flat designs, variants)
             if let Some(b) = &opts.board {
-                pcb_src = Some(std::path::absolute(b).map_err(|e| Refused(e.to_string()))?);
+                pcb_src = Some(altium::resolve(b).map_err(|e| Refused(e.to_string()))?);
             } else if let Some(first) = boards.first() {
                 pcb_src = Some(first.clone());
                 if boards.len() > 1 {

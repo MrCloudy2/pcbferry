@@ -63,6 +63,7 @@ def main() -> int:
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("projects", nargs="+", type=Path)
     args = ap.parse_args()
+    args.out = args.out.resolve()
     env = dict(os.environ, KICAD_CLI=args.engine, PYTHONPATH=str(REPO / "plugin" / "src"))
     failed = []
     for prj in args.projects:

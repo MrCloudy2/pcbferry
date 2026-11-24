@@ -2,6 +2,23 @@
 
 use std::path::{Path, PathBuf};
 
+/// The absolute path without `.` and `..` (kicad-cli's reports and the libraries it registers
+/// repeat the paths it is given). Symbolic links stay as they are, and the path needn't exist.
+pub fn resolve(path: &Path) -> std::io::Result<PathBuf> {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for part in std::path::absolute(path)?.components() {
+        match part {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            p => out.push(p),
+        }
+    }
+    Ok(out)
+}
+
 /// A file a .PrjPcb names, found as Windows would (case doesn't matter there)
 pub fn find_case_insensitive(base: &Path, rel: &str) -> Option<PathBuf> {
     let mut path = base.to_path_buf();
@@ -128,6 +145,15 @@ pub fn is(p: &Path, ext: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolves_parents() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            resolve(Path::new("a/../b/./c")).unwrap(),
+            cwd.join("b").join("c")
+        );
+    }
 
     #[test]
     fn reads_a_project() {

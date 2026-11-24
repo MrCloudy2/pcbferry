@@ -44,7 +44,7 @@ pub fn convert(
     check: Option<&Engine>,
     log: Log,
 ) -> Result<Outcome, String> {
-    let input = std::path::absolute(input).map_err(|e| e.to_string())?;
+    let input = crate::altium::resolve(input).map_err(|e| e.to_string())?;
     if !input.is_file() {
         return Err(format!("{}: no such file", input.display()));
     }
@@ -226,7 +226,7 @@ pub fn check_board(
     let back = dir.join("back.kicad_pcb");
     let mut cmd = std::process::Command::new(&engine.cli);
     cmd.args(["pcb", "import", "--format", "altium"])
-        .arg(std::path::absolute(doc).map_err(|e| e.to_string())?)
+        .arg(crate::altium::resolve(doc).map_err(|e| e.to_string())?)
         .arg("-o")
         .arg(&back)
         .current_dir(&dir);
