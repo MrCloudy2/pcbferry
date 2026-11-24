@@ -1,6 +1,7 @@
 # Pull requests and main: fast checks, then build the image and convert real Altium
 # projects with it. On a v* tag also build the macOS and Windows engines, push the image to
-# GHCR, and release the plugin (with every engine) and the corresponding source.
+# GHCR, and release the plugin (with every engine), the app (app.yml) and the corresponding
+# source.
 name: ci
 
 on:
@@ -26,7 +27,7 @@ jobs:
 
       - name: Wrapper scripts
         run: |
-          python3 -m py_compile pcbferry pcbferry_dru.py pcbferry-container plugin/*.py plugin/src/*.py plugin/src/olefile/*.py
+          python3 -m py_compile pcbferry pcbferry_dru.py pcbferry-container plugin/*.py plugin/src/*.py plugin/src/olefile/*.py app/tests/*.py
           python3 pcbferry --help > /dev/null
           shellcheck build.sh plugin/engine/*.sh plugin/src/*.sh
 
@@ -182,6 +183,18 @@ jobs:
           KICAD_CLI=$PWD/../engine/pcbferry-engine/bin/kicad-cli KICAD_DEMOS=$PWD/../kicad-demos/demos \
             cargo test --release --test schematics -- --nocapture --test-threads 2
 
+      - name: The Rust converter (app/) against the script, with this engine
+        run: |
+          set -euo pipefail
+          cd app
+          cargo build --release -p pcbferry-cli
+          # The engine as the app downloads it: unpacked by the Rust code, kicad-cli runnable
+          PCBFERRY_TEST_ENGINE_ARCHIVE=$PWD/../dist/pcbferry-engine-linux-x86_64.tar.xz \
+            cargo test --release -p pcbferry-core --test engine -- --nocapture
+          python3 -I tests/script_parity.py --engine "$PWD/../engine/pcbferry-engine/bin/kicad-cli" \
+            --rust target/release/pcbferry --out ../parity \
+            ../corpus/attiny85/hardware/ATTiny85.PrjPcb ../corpus/kasli/Kasli.PrjPCB
+
       - uses: actions/upload-artifact@v4
         with:
           name: kicad-plugin
@@ -238,8 +251,13 @@ jobs:
     if: (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
     uses: ./.github/workflows/engine-windows.yml
 
+  app:
+    needs: checks
+    if: (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
+    uses: ./.github/workflows/app.yml
+
   release:
-    needs: [build, engine-macos, engine-windows]
+    needs: [build, engine-macos, engine-windows, app]
     if: (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
     permissions:
@@ -263,6 +281,11 @@ jobs:
         with:
           name: release-source
           path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: app-*
+          merge-multiple: true
+          path: dist
 
       - name: Plugin with every engine, and the release
         env:
@@ -278,9 +301,14 @@ jobs:
             --engine windows-x86_64=dist/pcbferry-engine-windows-x86_64.tar.xz
           python3 -I -c "import json,zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); f=json.loads(z.read('plugins/engine.json'))['files']; assert len(f)==3, f; print(sorted(f))" \
             "dist/pcbferry-kicad-plugin-$version.zip"
+          # The app downloads its engine from the list the plugin carries
+          unzip -p "dist/pcbferry-kicad-plugin-$version.zip" plugins/engine.json > dist/engine.json
+          app_version=$(sed -n 's/^version = "\(.*\)"/\1/p' app/Cargo.toml | head -1)
+          [ "$app_version" = "$version" ] || { echo "app/Cargo.toml says $app_version, the release is $version"; exit 1; }
+          ls dist/pcbferry-app-linux-x86_64.tar.gz dist/pcbferry-app-macos-arm64.zip dist/pcbferry-app-windows-x86_64.zip
           # A manual run (workflow_dispatch) stops here: it checks the release without making one
           if [[ $GITHUB_REF != refs/tags/v* ]]; then ls -l dist; exit 0; fi
           gh release create "$GITHUB_REF_NAME" --generate-notes \
             dist/kicad-*-pcbferry-source.tar.xz dist/pcbferry-patches.tar.gz \
             "dist/pcbferry-kicad-plugin-$version.zip" dist/pcbferry-engine-*.tar.xz \
-            dist/packages.json dist/repository.json
+            dist/packages.json dist/repository.json dist/engine.json dist/pcbferry-app-*
