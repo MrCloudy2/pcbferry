@@ -6,7 +6,7 @@
 (`.PrjPcb`) into a KiCad 10 project: schematics, board, libraries and design
 rules, with every symbol and footprint linked to a library.
 
-It is KiCad's own Altium importer with [27 fixes](PATCHES.md), packaged as a
+It is KiCad's own Altium importer with [28 fixes](PATCHES.md), packaged as a
 container, so it runs the same on Linux, macOS and Windows. The result is a plain
 KiCad 10 project.
 
@@ -46,7 +46,11 @@ Without the launcher (from the project folder):
 docker run --rm -v "$PWD:/work" -w /work ghcr.io/mrcloudy2/pcbferry Board.PrjPcb out
 ```
 
-## KiCad plugin (preview, Linux)
+## KiCad plugin (preview)
+
+Coming with v0.2.0; v0.1.0 has no plugin. It has been tried on Linux. On macOS (Apple
+Silicon) the engine is tested but the plugin hasn't been tried inside KiCad yet, and on
+Windows KiCad can't start the plugin's launcher (a shell script): use the container there.
 
 No Docker needed: install `pcbferry-kicad-plugin-VERSION.zip` from the
 [latest release](https://github.com/MrCloudy2/pcbferry/releases/latest) in KiCad 10 with
@@ -69,10 +73,12 @@ A KiCad project holds one board, so for an Altium project with several boards th
 asks which one, or converts each into its own KiCad project.
 
 The first use downloads the converter engine (about 150 MB) from the same release. If
-nothing happens on a click, `~/.local/share/pcbferry/plugin.log` says why.
+nothing happens on a click, `plugin.log` says why; it is in `~/.local/share/pcbferry/`
+(macOS: `~/Library/Application Support/pcbferry/`).
 
 The engine is the same patched `kicad-cli` as in the container, so results are
-identical. Windows and macOS engines are next; until then use the container there.
+identical. It is built for Linux (x86_64), macOS (Apple Silicon) and Windows (x86_64), and
+CI converts a real Altium project with each.
 
 ## Options
 
@@ -126,8 +132,8 @@ patches (point `KICAD_CLI` at it).
 
 CI runs on every pull request: it applies the patches to the pinned KiCad tag,
 builds the image and converts two public Altium projects, failing on any failed
-step or unlinked symbol or footprint. A `v*` tag publishes the image and a release
-with the source.
+step or unlinked symbol or footprint. A `v*` tag publishes the image and a release with
+the plugin, the engine for each platform and the source.
 
 ## Relation to KiCad and licence
 

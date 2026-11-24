@@ -24,6 +24,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: README and PATCHES.md list every patch
+        run: |
+          set -euo pipefail
+          n=$(find patches -name '[0-9]*.patch' | wc -l)
+          grep -q "\[$n fixes\](PATCHES.md)" README.md || { echo "README.md doesn't say $n fixes"; exit 1; }
+          for f in patches/[0-9]*.patch; do
+            id=$(basename "$f" | cut -c1-4)
+            grep -q "^| \`$id\`" PATCHES.md || { echo "PATCHES.md has no row for $id"; exit 1; }
+          done
+
       - name: Wrapper scripts
         run: |
           python3 -m py_compile pcbferry pcbferry_dru.py pcbferry-container plugin/*.py plugin/src/*.py plugin/src/olefile/*.py
