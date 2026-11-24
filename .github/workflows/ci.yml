@@ -52,6 +52,57 @@ jobs:
             git -C kicad apply --whitespace=nowarn "$PWD/$p"
           done
 
+  # KiCad -> Altium: the Rust converter, and KiCad's demos written as PcbDocs (the files to open
+  # in Altium Designer, see k2a/ALTIUM-CHECK.md)
+  kicad2altium:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: k2a
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            k2a/target
+          key: cargo-${{ hashFiles('k2a/Cargo.lock') }}
+
+      - name: Format, lints, unit tests
+        run: |
+          cargo fmt --check
+          cargo clippy --release --all-targets -- -D warnings
+          cargo test --release --lib
+          cargo build --release
+
+      - name: KiCad's demos as PcbDocs and SchDocs
+        run: |
+          tag=$(sed -n 's/^ARG KICAD_TAG=//p' ../Containerfile)
+          git clone -q --depth 1 --branch "$tag" --filter=blob:none --sparse https://gitlab.com/kicad/code/kicad.git ../kicad
+          git -C ../kicad sparse-checkout set demos
+          mkdir -p ../out
+          find ../kicad/demos -name '*.kicad_pcb' -print0 | while IFS= read -r -d '' f; do
+            name=$(basename "${f%.kicad_pcb}")
+            cp "$f" "../out/$name.kicad_pcb"
+            ./target/release/kicad2altium "$f" "../out/$name.PcbDoc"
+          done
+          # Each project's schematic, in a folder of its own: a hierarchy is several SchDocs
+          find ../kicad/demos -name '*.kicad_pro' -print0 | while IFS= read -r -d '' p; do
+            sch="${p%.kicad_pro}.kicad_sch"
+            [ -f "$sch" ] || continue
+            name=$(basename "${p%.kicad_pro}")
+            mkdir -p "../out/$name-sch"
+            ./target/release/kicad2altium "$sch" "../out/$name-sch/$name.SchDoc"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kicad2altium-demos
+          path: out/
+          retention-days: 30
+
   build:
     needs: checks
     runs-on: ubuntu-24.04
@@ -127,6 +178,19 @@ jobs:
           docker run --rm -v "$PWD:/w" -w /w python:3.11-slim python3 plugin/test_plugin.py \
             "dist/pcbferry-kicad-plugin-$version.zip" dist \
             corpus/attiny85/hardware/ATTiny85.PrjPcb corpus/kasli/Kasli.PrjPCB
+
+      - name: KiCad -> Altium round trip over KiCad's demos, read back with this engine
+        run: |
+          set -euo pipefail
+          mkdir -p engine && tar -xf dist/pcbferry-engine-linux-x86_64.tar.xz -C engine
+          tag=$(sed -n 's/^ARG KICAD_TAG=//p' Containerfile)
+          git clone -q --depth 1 --branch "$tag" --filter=blob:none --sparse https://gitlab.com/kicad/code/kicad.git kicad-demos
+          git -C kicad-demos sparse-checkout set demos
+          cd k2a
+          KICAD_CLI=$PWD/../engine/pcbferry-engine/bin/kicad-cli KICAD_DEMOS=$PWD/../kicad-demos/demos \
+            cargo test --release --test roundtrip -- --nocapture --test-threads 2
+          KICAD_CLI=$PWD/../engine/pcbferry-engine/bin/kicad-cli KICAD_DEMOS=$PWD/../kicad-demos/demos \
+            cargo test --release --test schematics -- --nocapture --test-threads 2
 
       - uses: actions/upload-artifact@v4
         with:
