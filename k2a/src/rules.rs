@@ -22,6 +22,7 @@ mod kind {
     pub const DIFF_PAIRS_ROUTING: (u16, &str) = (51, "DiffPairsRouting");
     pub const HOLE_TO_HOLE: (u16, &str) = (52, "HoleToHoleClearance");
     pub const MASK_SLIVER: (u16, &str) = (53, "MinimumSolderMaskSliver");
+    pub const SILK_TO_MASK: (u16, &str) = (54, "SilkToSolderMaskClearance");
     pub const SILK_TO_SILK: (u16, &str) = (55, "SilkToSilkClearance");
     pub const BOARD_OUTLINE: (u16, &str) = (63, "BoardOutlineClearance");
 }
@@ -357,6 +358,20 @@ pub fn write(doc: &mut Doc, b: &Board, project: Option<&Project>, polygons: &[Ve
             },
         );
     }
+    // Silkscreen to exposed copper and mask openings: KiCad's silk clearance, none without one
+    // (Altium otherwise adds its own 10 mil rule, which KiCad's demos break by the hundred)
+    let silk = pr.rules.min_silk_clearance.unwrap_or(0);
+    w.rule(
+        kind::SILK_TO_MASK,
+        "SilkToSolderMaskClearance",
+        "All",
+        "All",
+        1,
+        |p| {
+            p.set("MINSILKSCREENTOMASKGAP", mil(silk))
+                .bool("CLEARANCETOEXPOSEDCOPPER", true);
+        },
+    );
     if let Some(g) = pr.rules.min_silk_clearance {
         w.rule(
             kind::SILK_TO_SILK,
@@ -399,18 +414,17 @@ pub fn write(doc: &mut Doc, b: &Board, project: Option<&Project>, polygons: &[Ve
             }
         },
     );
-    if b.mask_min_width > 0 {
-        w.rule(
-            kind::MASK_SLIVER,
-            "MinimumSolderMaskSliver",
-            "All",
-            "All",
-            1,
-            |p| {
-                p.set("MINSOLDERMASKWIDTH", mil(b.mask_min_width));
-            },
-        );
-    }
+    // KiCad's minimum mask web, 0 (no check) when it has none: Altium's own default is 10 mil
+    w.rule(
+        kind::MASK_SLIVER,
+        "MinimumSolderMaskSliver",
+        "All",
+        "All",
+        1,
+        |p| {
+            p.set("MINSOLDERMASKWIDTH", mil(b.mask_min_width));
+        },
+    );
 
     // How pads join polygons: each zone as KiCad set it
     let mut prio = 1;
