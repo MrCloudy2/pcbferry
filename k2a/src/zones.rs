@@ -7,12 +7,12 @@ use crate::kicad::{Board, Pt};
 /// Returns, for each zone, the names of the Altium polygons made from it
 pub fn write(doc: &mut Doc, b: &Board, report: &mut Report) -> Vec<Vec<String>> {
     let mut made: Vec<Vec<String>> = vec![Vec::new(); b.zones.len()];
+    let order = pour_order(&b.zones.iter().map(|z| z.priority).collect::<Vec<_>>());
     for (zi, z) in b.zones.iter().enumerate() {
         if z.keepout {
             keepout(doc, b, z, report);
             continue;
         }
-        let _ = zi;
         for layer in &z.layers {
             let names: Vec<String> = if layer == "F&B.Cu" || layer == "*.Cu" {
                 if layer == "*.Cu" {
@@ -68,7 +68,7 @@ pub fn write(doc: &mut Doc, b: &Board, report: &mut Report) -> Vec<Vec<String>> 
                 p.bool("SHELVED", false)
                     .bool("REMOVEISLANDSBYAREA", false)
                     .bool("REMOVENECKS", true);
-                p.num("POURINDEX", z.priority)
+                p.num("POURINDEX", order[zi])
                     .bool("IGNOREVIOLATIONS", false);
                 p.num("NET", net_index(z.net));
                 let pname = format!("Polygon {index}");
@@ -86,6 +86,23 @@ pub fn write(doc: &mut Doc, b: &Board, report: &mut Report) -> Vec<Vec<String>> 
         }
     }
     made
+}
+
+/// Each zone's place in Altium's pour order: Altium pours index 1 first and later polygons
+/// keep clear of it, KiCad fills its highest priority first. Equal priorities keep file order
+fn pour_order(priority: &[i64]) -> Vec<usize> {
+    let mut by: Vec<usize> = (0..priority.len()).collect();
+    by.sort_by_key(|&i| std::cmp::Reverse(priority[i]));
+    let mut order = vec![0; priority.len()];
+    for (rank, i) in by.into_iter().enumerate() {
+        order[i] = rank + 1;
+    }
+    order
+}
+
+#[test]
+fn highest_priority_pours_first() {
+    assert_eq!(pour_order(&[0, 1000, 5, 5]), vec![4, 1, 2, 3]);
 }
 
 /// A rule area as Altium keep-out regions: on the Keep-Out layer when it covers every copper
