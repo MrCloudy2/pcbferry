@@ -97,7 +97,7 @@ pub fn latin1(s: &str) -> Vec<u8> {
 }
 
 /// Altium property list: |KEY=VALUE|KEY=VALUE... and a closing NUL, length-prefixed
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Props(Vec<(String, String)>);
 
 impl Props {
@@ -112,6 +112,12 @@ impl Props {
             self.0.push((format!("%UTF8%{k}"), v.clone()));
         }
         self.0.push((k.to_string(), v));
+        self
+    }
+    /// Drop a key (and its UTF-8 twin), to set it anew
+    pub fn remove(&mut self, k: &str) -> &mut Self {
+        let utf = format!("%UTF8%{k}");
+        self.0.retain(|(x, _)| x != k && *x != utf);
         self
     }
     pub fn bool(&mut self, k: &str, v: bool) -> &mut Self {

@@ -549,8 +549,25 @@ impl Ctx<'_> {
             .u8(101, if paste_manual { 2 } else { 1 })
             .u8(102, if mask_manual { 2 } else { 1 })
             .f64(106, 0.0)
-            .u8(114, if smd { layer } else { 1 })
-            .u8(117, if smd { layer } else { 32 });
+            // The pad's copper as Altium Designer writes it, whatever the layer count: an SMD
+            // pad's layer as the low half of its layer stack id (top 0x0001, mid n 0x00nn,
+            // bottom 0xFFFF), a through-hole pad 0x000F with byte 116 = 3. AD26 reads an SMD
+            // 0x0020 as a Mid-Layer 31 (adds it to the stack and drops the pad), and a
+            // through-hole 0x0001 as a pad on the top layer only, which no bottom track reaches
+            .u16(
+                114,
+                match layer {
+                    _ if !smd => 0x000F,
+                    2..=31 => layer as u16,
+                    32 | 34 | 36 | 38 => 0xFFFF,
+                    _ => 1,
+                },
+            )
+            .u8(116, if smd { 0 } else { 3 })
+            // KiCad's importer reads byte 117 as a "from layer", but Altium Designer writes 1 here
+            // on every pad (top, bottom and through-hole alike) and AD26 refuses the whole Pads6
+            // storage ("Catastrophic failure") when it is anything else
+            .u8(117, 1);
 
         let needs6 = corner != 0 || slot != 0 || p.offset != Pt::default() || shape != alt;
         let mut sub6 = Buf::default();
@@ -657,8 +674,19 @@ impl Ctx<'_> {
         };
         // KiCad's markup (~{overbar}, ^{super}, _{sub}) has no Altium form: its plain text
         let (written, shown) = (strip_markup(&written), strip_markup(&shown));
+        // Altium's glyphs are as wide as they are high. On copper a KiCad text narrower than it
+        // is high would come out wider than in KiCad, and its copper would reach what KiCad
+        // keeps clear of it (Altium's DRC flags shorts on pic_programmer), so there the text
+        // is as high as KiCad's glyphs are wide: its copper stays inside KiCad's
+        let copper = (1..=32).contains(&l.v6);
+        let height = if copper && t.width > 0 && t.width < t.height {
+            t.width
+        } else {
+            t.height
+        };
         let t = &Text {
             text: written,
+            height,
             ..t.clone()
         };
         let mut b = templates::TEXT;
@@ -822,8 +850,9 @@ impl Ctx<'_> {
         // Board outline: the largest closed loop on Edge.Cuts
         let loops = crate::outline::loops(b);
         if let Some(main) = loops.first() {
-            for (i, v) in main.iter().enumerate() {
-                let k = i.to_string();
+            let mut n = 0usize;
+            for v in main.iter() {
+                let k = n.to_string();
                 match v {
                     crate::outline::Vertex::Line(pt) => {
                         p.num(&format!("KIND{k}"), 0);
@@ -849,6 +878,25 @@ impl Ctx<'_> {
                         p.set(&format!("R{k}"), mil(r.round() as Nm));
                     }
                 }
+                n += 1;
+            }
+            // Altium closes the outline by repeating its first point as the last vertex; without
+            // it Altium Designer drops the last edge (a rectangle comes out a triangle)
+            let first = match main.first() {
+                Some(crate::outline::Vertex::Line(pt)) => Some(*pt),
+                Some(crate::outline::Vertex::Arc { start, .. }) => Some(*start),
+                None => None,
+            };
+            if let Some(pt) = first.filter(|_| n > 0) {
+                let k = n.to_string();
+                p.num(&format!("KIND{k}"), 0);
+                p.set(&format!("VX{k}"), mil(pt.x));
+                p.set(&format!("VY{k}"), mil(Y_FLIP - pt.y));
+                p.set(&format!("CX{k}"), mil(0));
+                p.set(&format!("CY{k}"), mil(0));
+                p.num(&format!("SA{k}"), "0.000");
+                p.num(&format!("EA{k}"), "0.000");
+                p.set(&format!("R{k}"), mil(0));
             }
         } else {
             self.report
@@ -939,8 +987,129 @@ impl Ctx<'_> {
                 .set(&format!("{k}DIELHEIGHT"), "0mil");
             p.set(&format!("{k}DIELMATERIAL"), "FR-4");
         }
+        self.layer_stack_v8(&mut p, &chain, diel);
         p.num("LAYERSETSCOUNT", 1);
         self.doc.storage("Board6").push(&p.encode());
+    }
+
+    /// The layer stack as Altium Designer 19 and later keep it: a master stack, one sub-stack,
+    /// and the stack's layers top to bottom (paste, overlay, mask, copper with dielectric between,
+    /// mask, overlay, paste), then the mechanical layers in use. AD26 reads layers only from
+    /// these; a Board6 without LAYERMASTERSTACK_V8ID fails to load ("Catastrophic failure"), and
+    /// one with the master stack but no LAYER_V8 list loads with no layers at all.
+    fn layer_stack_v8(&self, p: &mut Props, chain: &[u8], diel: Nm) {
+        let sub = guid("substack 0");
+        p.num("LAYERMASTERSTACK_V8STYLE", 0)
+            .set("LAYERMASTERSTACK_V8ID", guid("master stack"))
+            .set("LAYERMASTERSTACK_V8NAME", "Master layer stack")
+            .bool("LAYERMASTERSTACK_V8SHOWTOPDIELECTRIC", false)
+            .bool("LAYERMASTERSTACK_V8SHOWBOTTOMDIELECTRIC", false)
+            .bool("LAYERMASTERSTACK_V8ISFLEX", false);
+        p.set("LAYERSUBSTACK_V8_0ID", sub.clone())
+            .set("LAYERSUBSTACK_V8_0NAME", "Board Layer Stack")
+            .bool("LAYERSUBSTACK_V8_0SHOWTOPDIELECTRIC", false)
+            .bool("LAYERSUBSTACK_V8_0SHOWBOTTOMDIELECTRIC", false)
+            .bool("LAYERSUBSTACK_V8_0ISFLEX", false)
+            .bool("LAYERSUBSTACK_V8_0SERVICE", false)
+            .bool("LAYERSUBSTACK_V8_0USEDBYPRIMS", false)
+            .num("LAYERSUBSTACK_V8_0TYPE", 1);
+
+        enum L {
+            Plain,
+            Mask,
+            Copper(bool),
+            Dielectric(usize),
+        }
+        // (name, V8 layer id, kind); copper ids: top 0x01000001, mid n 0x01000000+n, bottom
+        // 0x0100FFFF; dielectrics 0x01040000+n; paste/overlay/mask 0x01030006..0x0103000B
+        let mut stack: Vec<(String, u32, L)> = vec![
+            ("Top Paste".into(), 0x0103_0008, L::Plain),
+            ("Top Overlay".into(), 0x0103_0006, L::Plain),
+            ("Top Solder".into(), 0x0103_000A, L::Mask),
+        ];
+        for (i, &id) in chain.iter().enumerate() {
+            let (name, v8) = match id {
+                1 => (self.user_name("F.Cu", "Top Layer"), 0x0100_0001),
+                32 => (self.user_name("B.Cu", "Bottom Layer"), 0x0100_FFFF),
+                n => (
+                    match self.b.copper.get(n as usize - 1) {
+                        Some(c) => self.user_name(c, &format!("Mid-Layer {}", n - 1)),
+                        None => format!("Mid-Layer {}", n - 1),
+                    },
+                    0x0100_0000 + n as u32,
+                ),
+            };
+            stack.push((name, v8, L::Copper(i == 0)));
+            if i + 1 < chain.len() {
+                stack.push((
+                    format!("Dielectric {}", i + 1),
+                    0x0104_0001 + i as u32,
+                    L::Dielectric(i),
+                ));
+            }
+        }
+        stack.extend([
+            ("Bottom Solder".into(), 0x0103_000B, L::Mask),
+            ("Bottom Overlay".into(), 0x0103_0007, L::Plain),
+            ("Bottom Paste".into(), 0x0103_0009, L::Plain),
+        ]);
+        let mut n = 0usize;
+        for (name, id, kind) in &stack {
+            let k = format!("LAYER_V8_{n}");
+            p.num(&format!("{k}_{sub}CONTEXT"), 0)
+                .bool(&format!("{k}_{sub}USEDBYPRIMS"), false)
+                .set(&format!("{k}ID"), guid(&format!("layer {id}")))
+                .set(&format!("{k}NAME"), name.clone())
+                .num(&format!("{k}LAYERID"), id)
+                .bool(&format!("{k}USEDBYPRIMS"), true);
+            match kind {
+                L::Plain => {}
+                L::Mask => {
+                    p.num(&format!("{k}DIELTYPE"), 3)
+                        .set(&format!("{k}DIELCONST"), "3.500")
+                        .set(&format!("{k}DIELHEIGHT"), "0.4mil")
+                        .set(&format!("{k}DIELMATERIAL"), "Solder Resist")
+                        .set(&format!("{k}COVERLAY_EXPANSION"), "0mil");
+                }
+                L::Copper(top) => {
+                    let bottom = *id == 0x0100_FFFF;
+                    p.set(&format!("{k}COPTHICK"), "1.4mil").num(
+                        &format!("{k}COMPONENTPLACEMENT"),
+                        if *top {
+                            1
+                        } else if bottom {
+                            2
+                        } else {
+                            0
+                        },
+                    );
+                }
+                L::Dielectric(i) => {
+                    // core and prepreg alternating, as in the LAYERn records
+                    p.num(&format!("{k}DIELTYPE"), 1 + i % 2)
+                        .set(&format!("{k}DIELCONST"), "4.500")
+                        .set(&format!("{k}DIELHEIGHT"), mil(diel))
+                        .set(&format!("{k}DIELMATERIAL"), "FR-4");
+                }
+            }
+            n += 1;
+        }
+        for m in 1u16..=crate::models::BODY_BOTTOM {
+            if !self.mech_used(m) {
+                continue;
+            }
+            let k = format!("LAYER_V8_{n}");
+            let id = 0x0102_0000u32 + m as u32;
+            p.set(&format!("{k}ID"), guid(&format!("layer {id}")))
+                .set(&format!("{k}NAME"), self.mech_name(m))
+                .num(&format!("{k}LAYERID"), id)
+                .bool(&format!("{k}USEDBYPRIMS"), true)
+                .bool(&format!("{k}MECHENABLED"), true);
+            if let Some(kind) = self.mech_kind(m) {
+                p.set(&format!("{k}MECHKIND"), kind);
+            }
+            n += 1;
+        }
     }
 
     /// The KiCad layer on mechanical layer m, if any
@@ -977,6 +1146,34 @@ impl Ctx<'_> {
             _ => fallback.to_string(),
         }
     }
+}
+
+/// A GUID in Altium's spelling ({8-4-4-4-12}, upper case), derived from `seed` so that the same
+/// board always converts to the same bytes
+fn guid(seed: &str) -> String {
+    let mut h: [u64; 2] = [0xcbf2_9ce4_8422_2325, 0x9e37_79b9_7f4a_7c15];
+    for (j, x) in h.iter_mut().enumerate() {
+        for b in seed.bytes().chain(std::iter::once(j as u8)) {
+            *x ^= b as u64;
+            *x = x.wrapping_mul(0x0100_0000_01b3);
+        }
+        // final mix, so that similar seeds give unrelated ids
+        *x ^= *x >> 33;
+        *x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
+        *x ^= *x >> 33;
+    }
+    let v = ((h[0] as u128) << 64) | h[1] as u128;
+    // version 4 / variant 1 bits, as a random GUID has
+    let v = (v & !(0xf << 76) | (0x4 << 76)) & !(0x3 << 62) | (0x2 << 62);
+    let s = format!("{v:032X}");
+    format!(
+        "{{{}-{}-{}-{}-{}}}",
+        &s[0..8],
+        &s[8..12],
+        &s[12..16],
+        &s[16..20],
+        &s[20..32]
+    )
 }
 
 fn outline_bbox(b: &Board) -> Option<(Pt, Pt)> {

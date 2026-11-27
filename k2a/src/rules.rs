@@ -22,6 +22,7 @@ mod kind {
     pub const DIFF_PAIRS_ROUTING: (u16, &str) = (51, "DiffPairsRouting");
     pub const HOLE_TO_HOLE: (u16, &str) = (52, "HoleToHoleClearance");
     pub const MASK_SLIVER: (u16, &str) = (53, "MinimumSolderMaskSliver");
+    pub const SILK_TO_MASK: (u16, &str) = (54, "SilkToSolderMaskClearance");
     pub const SILK_TO_SILK: (u16, &str) = (55, "SilkToSilkClearance");
     pub const BOARD_OUTLINE: (u16, &str) = (63, "BoardOutlineClearance");
 }
@@ -81,6 +82,7 @@ fn scope_class(name: &str) -> String {
 
 /// Sizes the board actually uses, so maximum limits never flag what is already there
 struct Used {
+    min_track: Nm,
     max_track: Nm,
     max_via: Nm,
     max_via_drill: Nm,
@@ -95,6 +97,14 @@ fn used(b: &Board) -> Used {
         .map(|t| t.width)
         .chain(b.arcs.iter().map(|a| a.width))
         .max()
+        .unwrap_or(0);
+    let min_track = b
+        .tracks
+        .iter()
+        .map(|t| t.width)
+        .chain(b.arcs.iter().map(|a| a.width))
+        .filter(|&w| w > 0)
+        .min()
         .unwrap_or(0);
     let max_via = b.vias.iter().map(|v| v.size).max().unwrap_or(0);
     let max_via_drill = b.vias.iter().map(|v| v.drill).max().unwrap_or(0);
@@ -111,6 +121,7 @@ fn used(b: &Board) -> Used {
         max_hole = max_hole.max(h);
     }
     Used {
+        min_track,
         max_track,
         max_via,
         max_via_drill,
@@ -207,8 +218,14 @@ pub fn write(doc: &mut Doc, b: &Board, project: Option<&Project>, polygons: &[Ve
         }
     }
 
-    // Track width: preferred from the class, the minimum from the board, the maximum what is used
-    let min_w = pr.rules.min_track_width.unwrap_or(0);
+    // Track width: preferred from the class, the minimum from the board, the maximum what is used.
+    // Altium takes a minimum of 0 as no limit at all (its DRC report shows Min=99999mil), so
+    // without one from KiCad the narrowest track the board has is the minimum
+    let min_w = pr
+        .rules
+        .min_track_width
+        .filter(|&w| w > 0)
+        .unwrap_or(u.min_track);
     let widths: Vec<Nm> = pr.classes.iter().filter_map(|c| c.track_width).collect();
     let max_w = widths
         .iter()
@@ -341,6 +358,20 @@ pub fn write(doc: &mut Doc, b: &Board, project: Option<&Project>, polygons: &[Ve
             },
         );
     }
+    // Silkscreen to exposed copper and mask openings: KiCad's silk clearance, none without one
+    // (Altium otherwise adds its own 10 mil rule, which KiCad's demos break by the hundred)
+    let silk = pr.rules.min_silk_clearance.unwrap_or(0);
+    w.rule(
+        kind::SILK_TO_MASK,
+        "SilkToSolderMaskClearance",
+        "All",
+        "All",
+        1,
+        |p| {
+            p.set("MINSILKSCREENTOMASKGAP", mil(silk))
+                .bool("CLEARANCETOEXPOSEDCOPPER", true);
+        },
+    );
     if let Some(g) = pr.rules.min_silk_clearance {
         w.rule(
             kind::SILK_TO_SILK,
@@ -383,18 +414,17 @@ pub fn write(doc: &mut Doc, b: &Board, project: Option<&Project>, polygons: &[Ve
             }
         },
     );
-    if b.mask_min_width > 0 {
-        w.rule(
-            kind::MASK_SLIVER,
-            "MinimumSolderMaskSliver",
-            "All",
-            "All",
-            1,
-            |p| {
-                p.set("MINSOLDERMASKWIDTH", mil(b.mask_min_width));
-            },
-        );
-    }
+    // KiCad's minimum mask web, 0 (no check) when it has none: Altium's own default is 10 mil
+    w.rule(
+        kind::MASK_SLIVER,
+        "MinimumSolderMaskSliver",
+        "All",
+        "All",
+        1,
+        |p| {
+            p.set("MINSOLDERMASKWIDTH", mil(b.mask_min_width));
+        },
+    );
 
     // How pads join polygons: each zone as KiCad set it
     let mut prio = 1;
