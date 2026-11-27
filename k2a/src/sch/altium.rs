@@ -1169,9 +1169,16 @@ fn bus_members_spell_out_vectors() {
 pub fn expand_alias(text: &str, aliases: &HashMap<String, Vec<String>>) -> String {
     let t = unescape(&expand(text, aliases));
     // A group's vector members bit by bit: Altium reads `[a..b]` anywhere in a port's name as a
-    // bus, and KiCad names the bits of `G{D[0..1]}` and `G{D0 D1}` alike (G.D0, G.D1)
+    // bus, and KiCad names the bits of `G{D[0..1]}` and `G{D0 D1}` alike (G.D0, G.D1). A group
+    // without a prefix whose members share one (`{IOEXP.A IOEXP.B}`) is written with it
+    // (`IOEXP{A B}`), as its harness is: KiCad names the members alike, and reads the two forms
+    // on one bus as one group only when they are spelt alike
     match super::harness::group(&t) {
-        Some((prefix, members)) if t.contains("..") => format!("{prefix}{{{}}}", members.join(" ")),
+        Some((prefix, members))
+            if t.contains("..") || (t.starts_with('{') && !prefix.is_empty()) =>
+        {
+            format!("{prefix}{{{}}}", members.join(" "))
+        }
         _ => t,
     }
 }
