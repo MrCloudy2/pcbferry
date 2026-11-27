@@ -931,11 +931,12 @@ impl Out<'_> {
                     x: edge,
                     y: top + (k as Iu + 1) * step,
                 };
-                let len: Iu = labels
-                    .iter()
-                    .map(|l| crate::font::text_width(l, font) + 2 * step)
-                    .sum::<Iu>()
-                    .div_ceil_pos(step)
+                let len: Iu = (2 * step
+                    + labels
+                        .iter()
+                        .map(|l| crate::font::text_width(l, font) + 2 * step)
+                        .sum::<Iu>())
+                .div_ceil_pos(step)
                     * step;
                 wires.push((
                     e,
@@ -1017,7 +1018,9 @@ impl Out<'_> {
             self.terminals.insert(a);
             self.terminals.insert(b);
             self.segments.push((a, b));
-            let mut x = a.x + side * step;
+            // Clear of the bus KiCad's importer draws along the entries, 100 mil out: a label
+            // on it would name that bus and tie the members together
+            let mut x = a.x + side * 3 * step;
             for l in labels {
                 let mut n = record(25);
                 n.num("IndexInSheet", -1).num("OwnerPartId", -1).at(
@@ -1471,21 +1474,6 @@ pub fn convert(
             out.push(p);
             out.report.wires += 1;
         }
-    }
-    for (at, dir, t, members, names) in std::mem::take(&mut out.plan.bus_connectors) {
-        // A plain net label on the harness names it, so its members are PREFIX.MEMBER in
-        // Altium and in KiCad's reading of it, as KiCad named them
-        if let Some((prefix, _)) = names.first() {
-            let mut n = record(25);
-            n.num("IndexInSheet", -1)
-                .num("OwnerPartId", -1)
-                .at("Location.X", "Location.Y", at, &out.sh)
-                .num("Color", DARK)
-                .num("FontID", 1)
-                .set("Text", prefix.as_str());
-            out.push(n);
-        }
-        out.connector(at, dir, &t, &members, &names);
     }
     for (a, b) in &sch.bus_entries {
         let mut p = record(37);

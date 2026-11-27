@@ -189,10 +189,6 @@ pub struct Plan {
     pub connectors: HashMap<usize, Vec<(String, Vec<String>)>>,
     /// Sheet entries (sheet index, pin index) that carry a harness, with its type
     pub entries: HashMap<(usize, usize), String>,
-    /// Connectors on a harness drawn from a bus that also reaches sheet entries: where the
-    /// harness line leaves the bus, which way, its type, members and member net names
-    #[allow(clippy::type_complexity)]
-    pub bus_connectors: Vec<(P, P, String, Vec<String>, Vec<(String, Vec<String>)>)>,
     /// Harness types and their members
     pub types: BTreeMap<String, Vec<String>>,
     pub warnings: Vec<String>,
@@ -345,62 +341,23 @@ pub fn plan(
             plan.connectors.insert(*li, names);
         }
         if !net.entries.is_empty() {
-            // The bus reaches sheet entries too: it is a harness, and one connector on it
-            // takes the members to their wires
-            let mut segs = Vec::new();
-            for (i, seg) in buses.iter().enumerate() {
+            // The bus reaches sheet entries too: it is a harness between them. Its members that
+            // leave to wires on this sheet get no connector here: in KiCad's reading a harness
+            // on this sheet would be named here and rename the members (a port copy's
+            // connector, beside the sheet, still takes them)
+            for (i, _) in buses.iter().enumerate() {
                 if find(&mut parent, i) == n {
                     plan.harness_segments.insert(i);
-                    segs.push(*seg);
                 }
             }
+            for (k, et) in &net.entries {
+                plan.entries.insert(*k, et.clone());
+            }
+            // Its ports carry the harness themselves, on it
             for (li, t, _, _) in &net.ports {
                 plan.connectors.remove(li);
                 plan.ports.insert(*li, t.clone());
             }
-            let mut t = None;
-            for (k, et) in &net.entries {
-                plan.entries.insert(*k, et.clone());
-                t.get_or_insert(et.clone());
-            }
-            let t = t.unwrap_or_default();
-            let members = plan.types.get(&t).cloned().unwrap_or_default();
-            // From a bus end nothing else meets, else the first segment's start
-            let taken: Vec<P> = sch
-                .sheets
-                .iter()
-                .flat_map(|s| s.pins.iter().map(|p| p.at))
-                .chain(sch.labels.iter().map(|l| l.at))
-                .chain(sch.bus_entries.iter().flat_map(|(a, b)| [*a, *b]))
-                .collect();
-            let ends: Vec<(P, P)> = segs
-                .iter()
-                .flat_map(|&(a, b)| [(a, b), (b, a)])
-                .filter(|(e, _)| {
-                    segs.iter().filter(|s| on(*e, **s)).count() == 1 && !taken.contains(e)
-                })
-                .collect();
-            let (at, other) = ends.first().copied().unwrap_or(segs[0]);
-            // Straight on from a free end; from anywhere else, square off the bus
-            let d = at - other;
-            let dir = if ends.is_empty() {
-                if d.y == 0 {
-                    P { x: 0, y: 1 }
-                } else {
-                    P { x: 1, y: 0 }
-                }
-            } else {
-                P {
-                    x: d.x.signum(),
-                    y: d.y.signum(),
-                }
-            };
-            let names = if prefixes.is_empty() {
-                net.prefixes.clone()
-            } else {
-                prefixes
-            };
-            plan.bus_connectors.push((at, dir, t, members, names));
         }
     }
     plan
