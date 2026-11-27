@@ -2,6 +2,7 @@
 
 pub mod altium;
 pub mod check;
+pub mod harness;
 pub mod kicad;
 
 use std::collections::HashMap;
@@ -96,9 +97,27 @@ pub fn convert_file(input: &Path, output: &Path) -> Result<Report, Box<dyn std::
         report.sheets.push((target, r));
         todo.extend(children.into_iter().rev());
     }
+    // The harness types the sheets use, as Altium's harness definition file: TYPE=A,B,C
+    let mut types = std::collections::BTreeMap::new();
+    for (_, r) in &report.sheets {
+        for (t, m) in &r.harness_types {
+            types.entry(t.clone()).or_insert_with(|| m.clone());
+        }
+    }
+    let harness = output.with_extension("Harness");
+    if !types.is_empty() {
+        let text: String = types
+            .iter()
+            .map(|(t, m)| format!("{t}={}\r\n", m.join(",")))
+            .collect();
+        std::fs::write(&harness, text)?;
+    }
     if report.sheets.len() > 1 {
         let prj = output.with_extension("PrjPcb");
-        let docs: Vec<&Path> = report.sheets.iter().map(|(p, _)| p.as_path()).collect();
+        let mut docs: Vec<&Path> = report.sheets.iter().map(|(p, _)| p.as_path()).collect();
+        if !types.is_empty() {
+            docs.push(&harness);
+        }
         write_project(&prj, &docs)?;
         report.project = Some(prj);
     }
@@ -107,7 +126,10 @@ pub fn convert_file(input: &Path, output: &Path) -> Result<Report, Box<dyn std::
 
 /// An Altium project listing these documents (paths relative to the project's folder)
 pub fn write_project(prj: &Path, docs: &[&Path]) -> std::io::Result<()> {
-    let mut text = String::from("[Design]\r\nVersion=1.0\r\n");
+    // HierarchyMode 2, Hierarchical: ports meet sheet entries, net labels stay on their sheet
+    // and power ports are global, as KiCad's labels behave. Left automatic, Altium makes the
+    // net labels of a sheet used twice one net across both copies
+    let mut text = String::from("[Design]\r\nVersion=1.0\r\nHierarchyMode=2\r\n");
     for (i, p) in docs.iter().enumerate() {
         let n = p.file_name().unwrap_or_default().to_string_lossy();
         text += &format!("\r\n[Document{}]\r\nDocumentPath={n}\r\n", i + 1);

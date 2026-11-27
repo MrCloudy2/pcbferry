@@ -215,6 +215,10 @@ const BLUE: i32 = 8_388_608; // Altium stores colours as 0xBBGGRR
 const LINE: i32 = 16_711_680;
 const BODY: i32 = 11_599_871;
 const DARK: i32 = 128;
+/// Altium's colours for a signal harness and a harness connector
+const HARNESS: i32 = 15_187_117;
+const CONNECTOR: i32 = 13_213_327;
+const CONNECTOR_AREA: i32 = 16_511_725;
 
 #[derive(Default)]
 pub struct Report {
@@ -223,6 +227,8 @@ pub struct Report {
     pub wires: usize,
     pub labels: usize,
     pub warnings: Vec<String>,
+    /// Harness types used, with their members, for the project's .Harness file
+    pub harness_types: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 struct Out<'a> {
@@ -235,6 +241,16 @@ struct Out<'a> {
     aliases: &'a HashMap<String, Vec<String>>,
     /// Global labels as power ports: the design has sheets
     global_power: bool,
+    /// The sheet's local label names: KiCad joins a hierarchical label to a local label of its
+    /// name anywhere on the sheet, Altium joins a port only to what it touches
+    local_names: std::collections::HashSet<String>,
+    /// How the sheet's group buses become harnesses
+    plan: super::harness::Plan,
+    /// The Additional stream: harness connectors, their entries and types, signal harnesses
+    extra: Vec<Props>,
+    /// Where the next port copy with its harness connector goes, down the strip right of the
+    /// sheet
+    strip_y: Iu,
     sh: Sheet,
     report: Report,
 }
@@ -303,12 +319,27 @@ impl Out<'_> {
             }
         };
 
+        let mine = |d: &&super::kicad::Drawn| {
+            (d.unit == 0 || d.unit == s.unit) && (d.style == 0 || d.style == s.style)
+        };
+        // KiCad joins pins stacked on one point; Altium joins a hidden pin to nothing there, so
+        // a hidden pin under a shown one is shown too (it draws on top of it)
+        let shown_at: std::collections::HashSet<P> = lib
+            .items
+            .iter()
+            .filter(mine)
+            .filter_map(|d| match &d.item {
+                Item::Pin(p) if !p.hidden => Some(p.at),
+                _ => None,
+            })
+            .collect();
         for d in &lib.items {
-            if (d.unit != 0 && d.unit != s.unit) || (d.style != 0 && d.style != s.style) {
+            if !mine(&d) {
                 continue;
             }
             match &d.item {
                 Item::Pin(pin) => {
+                    let hidden = pin.hidden && !shown_at.contains(&pin.at);
                     let dir = match pin.angle {
                         90 => P {
                             x: 0,
@@ -344,7 +375,7 @@ impl Out<'_> {
                         3
                     };
                     let mut flags = o;
-                    if pin.hidden {
+                    if hidden {
                         flags |= 4;
                     }
                     if !lib.hide_pin_names && pin.name != "~" {
@@ -392,7 +423,7 @@ impl Out<'_> {
                     let pi = self.push(p);
                     // KiCad ties an invisible power input to the net of its name; Altium says
                     // so with the pin's hidden net name
-                    if pin.hidden && pin.kind == "power_in" && !pin.name.is_empty() {
+                    if hidden && pin.kind == "power_in" && !pin.name.is_empty() {
                         let mut h = self.owned(41, pi, -1);
                         h.set("Name", "HiddenNetName")
                             .set("Text", pin.name.as_str())
@@ -577,7 +608,7 @@ impl Out<'_> {
     }
 
     /// A KiCad power symbol as an Altium power port: its net (KiCad's value), at its pin
-    fn power_port(&mut self, s: &Symbol, lib: &LibSymbol) {
+    fn power_port(&mut self, s: &Symbol, lib: &LibSymbol, net: &str) {
         let tr = symbol_transform(s);
         let place = |q: P| tr.apply(q) + s.at;
         let Some(pin) = lib.items.iter().find_map(|d| match &d.item {
@@ -619,7 +650,7 @@ impl Out<'_> {
         } else {
             3
         };
-        let value = s.value_of("Value");
+        let value = unescape(net);
         let ground = orient == 3 || value.to_uppercase().contains("GND");
         let mut p = record(17);
         p.num("IndexInSheet", -1)
@@ -632,13 +663,13 @@ impl Out<'_> {
             .num("Orientation", orient)
             .num("Color", DARK)
             .num("FontID", 1)
-            .set("Text", value)
+            .set("Text", value.as_str())
             .set("UniqueID", unique_id(&s.uuid));
         self.push(p);
         self.report.power_ports += 1;
     }
 
-    fn label(&mut self, l: &super::kicad::Label) {
+    fn label(&mut self, li: usize, l: &super::kicad::Label) {
         // Sized by the label as written: an alias spelled out is far longer
         let written = l.text.clone();
         let text = expand_alias(&l.text, self.aliases);
@@ -681,9 +712,31 @@ impl Out<'_> {
                 self.push(p);
             }
             LabelKind::Global | LabelKind::Hierarchical => {
+                // A harness port must not touch the bus it came on (Altium: "Harness Port placed
+                // on a bus"): it stands a grid step off the bus end, its harness on the far side
+                let shifted;
+                let l = if self.plan.connectors.contains_key(&li) {
+                    let off = 100 * MIL;
+                    let d = match l.angle {
+                        180 => P { x: -off, y: 0 },
+                        90 => P { x: 0, y: -off },
+                        270 => P { x: 0, y: off },
+                        _ => P { x: off, y: 0 },
+                    };
+                    shifted = super::kicad::Label {
+                        at: l.at + d,
+                        ..l.clone()
+                    };
+                    &shifted
+                } else {
+                    l
+                };
                 // The importer puts the label at whichever end of the port meets a wire
                 let width = crate::font::text_width(&written, l.size) + 2 * l.size;
-                let mut width = width.max(20 * MIL);
+                // In whole 50 mil steps: a port drawn from its far end has that end on the
+                // sheet's grid (Altium warns of an off-grid port)
+                let step = 50 * MIL;
+                let mut width = (width.max(20 * MIL) + step - 1) / step * step;
                 let far = |w: Iu| match l.angle {
                     180 => l.at - P { x: w, y: 0 },
                     270 => l.at + P { x: 0, y: w },
@@ -703,7 +756,7 @@ impl Out<'_> {
                         })
                 };
                 while taken(far(width)) {
-                    width += 10 * MIL;
+                    width += step;
                 }
                 let location = match l.angle {
                     180 | 270 => far(width),
@@ -739,7 +792,66 @@ impl Out<'_> {
                     .num("TextFontID", 1)
                     .set("Name", l.text.as_str())
                     .set("UniqueID", unique_id(&format!("{}{:?}", l.text, l.at)));
-                self.push(p);
+                if let Some(t) = self.plan.ports.get(&li) {
+                    p.set("HarnessType", t.as_str());
+                }
+                self.push(p.clone());
+                if let Some(names) = self.plan.connectors.get(&li).cloned() {
+                    // The members leave through a copy of the port beside the sheet, right of
+                    // its border, one under another: a connector next to the port would land on
+                    // whatever KiCad drew around it. Ports of one name are one net in Altium
+                    let t = self.plan.ports[&li].clone();
+                    let members = super::harness::group(&l.text)
+                        .map(|g| g.1)
+                        .unwrap_or_default();
+                    let at = P {
+                        x: self.sh.size.x + 1000 * MIL,
+                        y: self.strip_y,
+                    };
+                    let mut q = p.clone();
+                    for k in [
+                        "Location.X",
+                        "Location.Y",
+                        "Location.X_Frac",
+                        "Location.Y_Frac",
+                        "Style",
+                        "UniqueID",
+                    ] {
+                        q.remove(k);
+                    }
+                    q.num("Style", if io == 3 { 3 } else { 2 })
+                        .at("Location.X", "Location.Y", at, &self.sh)
+                        .set("UniqueID", unique_id(&format!("{}{:?}strip", l.text, l.at)));
+                    self.push(q);
+                    let free = at + P { x: width, y: 0 };
+                    let height = (members.len() as Iu + 3) * 100 * MIL;
+                    self.strip_y += height;
+                    self.connector(free, P { x: 1, y: 0 }, &t, &members, &names);
+                }
+                if bus_members(&l.text)
+                    .iter()
+                    .any(|m| self.local_names.contains(m))
+                {
+                    // A net label of the port's name where the port connects, so the port's
+                    // net meets the sheet's other labels of that name
+                    let mut p = record(25);
+                    p.num("IndexInSheet", -1).num("OwnerPartId", -1).at(
+                        "Location.X",
+                        "Location.Y",
+                        l.at,
+                        &self.sh,
+                    );
+                    if !horizontal {
+                        p.num("Orientation", 1);
+                    }
+                    if l.angle == 0 || l.angle == 90 {
+                        p.num("Justification", 2);
+                    }
+                    p.num("Color", DARK)
+                        .num("FontID", 1)
+                        .set("Text", l.text.as_str());
+                    self.push(p);
+                }
             }
         }
         self.report.labels += 1;
@@ -747,8 +859,193 @@ impl Out<'_> {
 }
 
 impl Out<'_> {
+    /// A harness connector for a group port whose members leave its bus on this sheet: a signal
+    /// harness from the port's free end, the connector, and one entry per member, each wired to
+    /// net labels naming the member as the sheet's groups name it (`PREFIX.MEMBER`), so the
+    /// entry meets the member's wires
+    fn connector(
+        &mut self,
+        free: P,
+        dir: P,
+        t: &str,
+        members: &[String],
+        names: &[(String, Vec<String>)],
+    ) {
+        let step = 100 * MIL;
+        let font = 80 * MIL;
+        let labels_of = |m: &String| -> Vec<String> {
+            names
+                .iter()
+                .filter(|(p, ms)| {
+                    ms.contains(m)
+                        && (self.local_names.contains(&super::harness::member_net(p, m))
+                            || names.len() == 1)
+                })
+                .map(|(p, _)| super::harness::member_net(p, m))
+                .collect()
+        };
+        let stubs: Vec<Vec<String>> = members.iter().map(labels_of).collect();
+        let xsize = (members
+            .iter()
+            .map(|m| crate::font::text_width(m, font))
+            .max()
+            .unwrap_or(0)
+            + 2 * step)
+            .div_ceil_pos(step)
+            * step;
+        let xsize = xsize.max(4 * step);
+        let ysize = (members.len() as Iu + 1) * step;
+        let right = dir.x >= 0;
+        let side: Iu = if right { 1 } else { -1 };
+        let taken = |out: &Self, q: P| {
+            out.terminals.contains(&q)
+                || out
+                    .segments
+                    .iter()
+                    .any(|s| super::harness::on_segment(q, *s))
+        };
+        // Further out until the member wires touch nothing on the sheet
+        let mut reach = 2 * step;
+        let (pts, left, top, wires) = loop {
+            let mut pts = vec![free];
+            let h = if dir.y != 0 {
+                let mid = free
+                    + P {
+                        x: 0,
+                        y: dir.y * 2 * step,
+                    };
+                pts.push(mid);
+                mid + P { x: reach, y: 0 }
+            } else {
+                free + P {
+                    x: side * reach,
+                    y: 0,
+                }
+            };
+            pts.push(h);
+            let top = h.y - step;
+            let left = if right { h.x } else { h.x - xsize };
+            let edge = if right { left + xsize } else { left };
+            let mut wires = Vec::new();
+            for (k, labels) in stubs.iter().enumerate() {
+                if labels.is_empty() {
+                    continue;
+                }
+                let e = P {
+                    x: edge,
+                    y: top + (k as Iu + 1) * step,
+                };
+                let len: Iu = labels
+                    .iter()
+                    .map(|l| crate::font::text_width(l, font) + 2 * step)
+                    .sum::<Iu>()
+                    .div_ceil_pos(step)
+                    * step;
+                wires.push((
+                    e,
+                    e + P {
+                        x: side * len,
+                        y: 0,
+                    },
+                    labels.clone(),
+                ));
+            }
+            let clash = wires.iter().any(|(a, b, _)| {
+                let mut x = a.x.min(b.x);
+                let mut hit = false;
+                while x <= a.x.max(b.x) {
+                    hit |= taken(self, P { x, y: a.y });
+                    x += step / 2;
+                }
+                hit
+            });
+            if !clash || reach > 60 * step {
+                break (pts, left, top, wires);
+            }
+            reach += 3 * step;
+        };
+        let mut h = record(218);
+        h.num("OwnerPartId", -1)
+            .num("LineWidth", 2)
+            .num("Color", HARNESS);
+        self.poly(&mut h, &pts);
+        self.extra.push(h);
+        let ci = self.extra.len();
+        let mut c = record(215);
+        c.num("OwnerPartId", -1)
+            .at("Location.X", "Location.Y", P { x: left, y: top }, &self.sh)
+            .dist("XSize", xsize)
+            .dist("YSize", ysize)
+            .num("LineWidth", 1)
+            .num("Color", CONNECTOR)
+            .num("AreaColor", CONNECTOR_AREA)
+            .dist("PrimaryConnectionPosition", step);
+        if !right {
+            c.num("HarnessConnectorSide", 1);
+        }
+        self.extra.push(c);
+        for (k, m) in members.iter().enumerate() {
+            let mut e = record(216);
+            e.num("OwnerIndex", ci)
+                .t("OwnerIndexAdditionalList")
+                .num("OwnerPartId", -1);
+            if right {
+                e.num("Side", 1);
+            }
+            e.num("DistanceFromTop", k + 1)
+                .num("Color", 7_354_880)
+                .num("AreaColor", 8_454_143)
+                .num("TextColor", 7_354_880)
+                .num("TextFontID", 1)
+                .set("TextStyle", "Full")
+                .set("Name", m.as_str());
+            self.extra.push(e);
+        }
+        let mut ty = record(217);
+        ty.num("OwnerIndex", ci)
+            .t("OwnerIndexAdditionalList")
+            .num("OwnerPartId", -1)
+            .at("Location.X", "Location.Y", P { x: left, y: top }, &self.sh)
+            .num("Color", BLUE)
+            .num("FontID", 1)
+            .set("Text", t);
+        self.extra.push(ty);
+        for (a, b, labels) in wires {
+            let mut w = record(27);
+            w.num("IndexInSheet", -1)
+                .num("OwnerPartId", -1)
+                .num("LineWidth", 1)
+                .num("Color", BLUE);
+            self.poly(&mut w, &[a, b]);
+            self.push(w);
+            self.terminals.insert(a);
+            self.terminals.insert(b);
+            self.segments.push((a, b));
+            let mut x = a.x + side * step;
+            for l in labels {
+                let mut n = record(25);
+                n.num("IndexInSheet", -1).num("OwnerPartId", -1).at(
+                    "Location.X",
+                    "Location.Y",
+                    P { x, y: a.y },
+                    &self.sh,
+                );
+                if !right {
+                    n.num("Justification", 2);
+                }
+                n.num("Color", DARK)
+                    .num("FontID", 1)
+                    .set("Text", l.as_str());
+                self.push(n);
+                x += side * (crate::font::text_width(&l, font) + 2 * step);
+            }
+        }
+    }
+}
+
+impl Out<'_> {
     /// A KiCad sheet as an Altium sheet symbol: its name, its file and its entries
-    fn sheet_symbol(&mut self, sheet: &super::kicad::Sheet, file: &str) {
+    fn sheet_symbol(&mut self, sheet_no: usize, sheet: &super::kicad::Sheet, file: &str) {
         let mut p = record(15);
         p.num("IndexInSheet", -1)
             .num("OwnerPartId", -1)
@@ -780,7 +1077,7 @@ impl Out<'_> {
                 .set("Text", text);
             self.push(p);
         }
-        for pin in &sheet.pins {
+        for (pi, pin) in sheet.pins.iter().enumerate() {
             let (side, along) = if pin.at.x <= sheet.at.x {
                 (0, pin.at.y - sheet.at.y)
             } else if pin.at.x >= sheet.at.x + sheet.size.x {
@@ -817,18 +1114,94 @@ impl Out<'_> {
                 .set("Name", expand_alias(&pin.name, self.aliases))
                 .num("IOType", io)
                 .num("Style", if side < 2 { 3 } else { 7 });
+            if let Some(t) = self.plan.entries.get(&(sheet_no, pi)) {
+                p.set("HarnessType", t.as_str());
+            }
             self.push(p);
         }
     }
 }
 
+/// The names a label carries: itself, and for a vector bus `PREFIX[a..b]` (or a group of them,
+/// `{A[0..1] B}`, as an alias spells out) each member
+pub fn bus_members(text: &str) -> Vec<String> {
+    let mut out = vec![text.to_string()];
+    let body = text
+        .find('{')
+        .filter(|_| text.ends_with('}'))
+        .map_or(text, |i| &text[i + 1..text.len() - 1]);
+    for part in body.split_whitespace() {
+        out.push(part.to_string());
+        let Some((prefix, range)) = part.strip_suffix(']').and_then(|p| p.rsplit_once('[')) else {
+            continue;
+        };
+        let Some((a, b)) = range.split_once("..") else {
+            continue;
+        };
+        if let (Ok(a), Ok(b)) = (a.trim().parse::<i64>(), b.trim().parse::<i64>()) {
+            for i in a.min(b)..=a.max(b) {
+                out.push(format!("{prefix}{i}"));
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn bus_members_spell_out_vectors() {
+    assert!(bus_members("IRQ-[1..3]").contains(&"IRQ-2".to_string()));
+    assert!(bus_members("{D[0..1] CLK}").contains(&"D1".to_string()));
+    assert!(bus_members("{D[0..1] CLK}").contains(&"CLK".to_string()));
+    assert_eq!(
+        bus_members("SDA"),
+        vec!["SDA".to_string(), "SDA".to_string()]
+    );
+}
+
 /// A bus label naming an alias, `{ALIAS}` or `PREFIX{ALIAS}`, with the alias's members spelled
 /// out: an alias is a KiCad definition the SchDoc has no place for
 pub fn expand_alias(text: &str, aliases: &HashMap<String, Vec<String>>) -> String {
+    let t = unescape(&expand(text, aliases));
+    // A group's vector members bit by bit: Altium reads `[a..b]` anywhere in a port's name as a
+    // bus, and KiCad names the bits of `G{D[0..1]}` and `G{D0 D1}` alike (G.D0, G.D1)
+    match super::harness::group(&t) {
+        Some((prefix, members)) if t.contains("..") => format!("{prefix}{{{}}}", members.join(" ")),
+        _ => t,
+    }
+}
+
+/// KiCad's escapes in a net name (`{slash}` for `/`, ...) as the characters they stand for
+pub fn unescape(text: &str) -> String {
+    if !text.contains('{') {
+        return text.to_string();
+    }
+    [
+        ("{slash}", "/"),
+        ("{backslash}", "\\"),
+        ("{colon}", ":"),
+        ("{dblquote}", "\""),
+        ("{lt}", "<"),
+        ("{gt}", ">"),
+        ("{comma}", ","),
+        ("{space}", " "),
+        ("{tab}", " "),
+        ("{return}", " "),
+    ]
+    .iter()
+    .fold(text.to_string(), |t, (k, v)| t.replace(k, v))
+}
+
+#[test]
+fn escapes_become_characters() {
+    assert_eq!(unescape("VPP{slash}MCLR"), "VPP/MCLR");
+    assert_eq!(unescape("~{CS}"), "~{CS}");
+}
+
+fn expand(text: &str, aliases: &HashMap<String, Vec<String>>) -> String {
     // The group is the last brace pair, closing the text; `_{..}`, `^{..}` and `~{..}` are
     // KiCad's subscript, superscript and overbar markup
     if let Some(body) = text.strip_suffix('}') {
-        if let Some(a) = body.rfind('{') {
+        if let Some(a) = super::harness::open_brace(text) {
             let markup = text[..a].ends_with(['_', '^', '~']);
             if let (false, Some(m)) = (markup, aliases.get(body[a + 1..].trim())) {
                 return format!("{}{{{}}}", &text[..a], m.join(" "));
@@ -904,6 +1277,27 @@ fn arc(s: P, m: P, e: P, offset: Iu) -> Option<(P, Iu, f64, f64)> {
 }
 
 /// The reference a symbol has on this sheet instance
+/// The net a symbol stands for when it is a power symbol: one flagged as power, or an older
+/// library's `#PWR` symbol whose only pin is a hidden power input (KiCad ties that pin to the
+/// net of its name)
+fn power_net(s: &Symbol, lib: &LibSymbol) -> Option<String> {
+    if lib.power {
+        return Some(s.value_of("Value").to_string());
+    }
+    let mut pins = lib.items.iter().filter_map(|d| match &d.item {
+        Item::Pin(p) => Some(p),
+        _ => None,
+    });
+    let (Some(pin), None) = (pins.next(), pins.next()) else {
+        return None;
+    };
+    (s.value_of("Reference").starts_with('#')
+        && pin.kind == "power_in"
+        && pin.hidden
+        && !pin.name.is_empty())
+    .then(|| pin.name.clone())
+}
+
 pub fn reference(s: &Symbol, path: &str) -> String {
     s.refs
         .iter()
@@ -943,7 +1337,16 @@ pub fn convert(
             .copied()
             .collect(),
         aliases,
+        plan: super::harness::plan(sch, &|t| expand_alias(t, aliases), aliases),
+        extra: Vec::new(),
+        strip_y: 1000 * MIL,
         global_power: hierarchical,
+        local_names: sch
+            .labels
+            .iter()
+            .filter(|l| l.kind == LabelKind::Local)
+            .map(|l| expand_alias(&l.text, aliases))
+            .collect(),
         sh,
         report: Report::default(),
     };
@@ -1005,7 +1408,11 @@ pub fn convert(
     // designators; every unit takes the library reference of its lowest unit
     let mut lib_of_ref: HashMap<String, (u32, String)> = HashMap::new();
     for sym in &sch.symbols {
-        if sch.lib.get(&sym.lib_key).is_none_or(|l| l.power) {
+        if sch
+            .lib
+            .get(&sym.lib_key)
+            .is_none_or(|l| power_net(sym, l).is_some())
+        {
             continue;
         }
         let name = sym
@@ -1026,10 +1433,10 @@ pub fn convert(
             missing.insert(sym.lib_key.clone());
             continue;
         };
-        if lib.power {
+        if let Some(net) = power_net(sym, lib) {
             // PWR_FLAG only quiets ERC; Altium has no equivalent symbol
             if !sym.value_of("Value").contains("PWR_FLAG") && !sym.lib_id.ends_with(":PWR_FLAG") {
-                out.power_port(sym, lib);
+                out.power_port(sym, lib, &net);
             }
             continue;
         }
@@ -1044,7 +1451,17 @@ pub fn convert(
     }
 
     for (kind, segs) in [(27, &sch.wires), (26, &sch.buses)] {
-        for (a, b) in segs.iter() {
+        for (i, (a, b)) in segs.iter().enumerate() {
+            if kind == 26 && out.plan.harness_segments.contains(&i) {
+                // A bus joining harness ports and entries only: a signal harness
+                let mut p = record(218);
+                p.num("OwnerPartId", -1)
+                    .num("LineWidth", 2)
+                    .num("Color", HARNESS);
+                out.poly(&mut p, &[*a, *b]);
+                out.extra.push(p);
+                continue;
+            }
             let mut p = record(kind);
             p.num("IndexInSheet", -1)
                 .num("OwnerPartId", -1)
@@ -1054,6 +1471,9 @@ pub fn convert(
             out.push(p);
             out.report.wires += 1;
         }
+    }
+    for (at, dir, t, members, names) in std::mem::take(&mut out.plan.bus_connectors) {
+        out.connector(at, dir, &t, &members, &names);
     }
     for (a, b) in &sch.bus_entries {
         let mut p = record(37);
@@ -1083,8 +1503,8 @@ pub fn convert(
         out.push(p);
     }
     let labels = sch.labels.clone();
-    for l in &labels {
-        out.label(l);
+    for (li, l) in labels.iter().enumerate() {
+        out.label(li, l);
     }
     for n in &sch.notes {
         let lines: Vec<&str> = n.text.lines().collect();
@@ -1137,8 +1557,8 @@ pub fn convert(
         out.poly(&mut p, l);
         out.push(p);
     }
-    for (sheet, file) in sch.sheets.iter().zip(sheet_files) {
-        out.sheet_symbol(sheet, file);
+    for (si, (sheet, file)) in sch.sheets.iter().zip(sheet_files).enumerate() {
+        out.sheet_symbol(si, sheet, file);
     }
 
     let mut header = Props::new();
@@ -1158,8 +1578,48 @@ pub fn convert(
     storage.set("HEADER", "Icon storage");
     let mut doc = Doc::default();
     doc.streams.insert("FileHeader".into(), stream);
+    if !out.extra.is_empty() {
+        let mut header = Props::new();
+        header
+            .set(
+                "HEADER",
+                "Protel for Windows - Schematic Capture Binary File Version 5.0",
+            )
+            .num("Weight", out.extra.len());
+        let mut extra = header.encode();
+        for r in &out.extra {
+            extra.extend(r.encode());
+        }
+        doc.streams.insert("Additional".into(), extra);
+        let used: std::collections::HashSet<&String> = out
+            .plan
+            .ports
+            .values()
+            .chain(out.plan.entries.values())
+            .collect();
+        out.report.harness_types = out
+            .plan
+            .types
+            .iter()
+            .filter(|(t, _)| used.contains(t))
+            .map(|(t, m)| (t.clone(), m.clone()))
+            .collect();
+    }
+    let warnings = std::mem::take(&mut out.plan.warnings);
+    out.report.warnings.extend(warnings);
     doc.streams.insert("Storage".into(), storage.encode());
     (doc, out.report)
+}
+
+/// Division rounding up, for lengths that are never negative
+trait DivCeilPos {
+    fn div_ceil_pos(self, step: Self) -> Self;
+}
+
+impl DivCeilPos for Iu {
+    fn div_ceil_pos(self, step: Iu) -> Iu {
+        (self + step - 1).div_euclid(step)
+    }
 }
 
 #[cfg(test)]
