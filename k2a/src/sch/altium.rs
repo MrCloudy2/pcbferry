@@ -919,7 +919,10 @@ impl Out<'_> {
                 }
             };
             pts.push(h);
-            let top = h.y - step;
+            // The harness meets the connector between the top and its first entry: KiCad's importer
+            // runs its own bus back to the harness at that height, and on an entry's wire it would
+            // tie the members together
+            let top = h.y - step / 2;
             let left = if right { h.x } else { h.x - xsize };
             let edge = if right { left + xsize } else { left };
             let mut wires = Vec::new();
@@ -976,7 +979,7 @@ impl Out<'_> {
             .num("LineWidth", 1)
             .num("Color", CONNECTOR)
             .num("AreaColor", CONNECTOR_AREA)
-            .dist("PrimaryConnectionPosition", step);
+            .dist("PrimaryConnectionPosition", step / 2);
         if !right {
             c.num("HarnessConnectorSide", 1);
         }
