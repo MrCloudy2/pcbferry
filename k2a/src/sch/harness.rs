@@ -24,7 +24,28 @@ pub fn group(text: &str) -> Option<(String, Vec<String>)> {
             None => members.push(part.to_string()),
         }
     }
-    (!members.is_empty()).then(|| (text[..a].to_string(), members))
+    if members.is_empty() {
+        return None;
+    }
+    let prefix = text[..a].to_string();
+    // `{DDR4-PS}` naming an alias of `DDR4-PS.A0`...: the members' shared prefix is the group's
+    // (its nets are DDR4-PS.A0... either way), so the harness has a name
+    if prefix.is_empty() {
+        if let Some((p, _)) = members[0].split_once('.') {
+            let head = format!("{p}.");
+            if members
+                .iter()
+                .all(|m| m.starts_with(&head) && m.len() > head.len())
+            {
+                let rest = members
+                    .iter()
+                    .map(|m| m[head.len()..].to_string())
+                    .collect();
+                return Some((p.to_string(), rest));
+            }
+        }
+    }
+    Some((prefix, members))
 }
 
 /// The brace that opens the group closing the text (`SWD{~{RESET}, CLK}`: the first one, as
@@ -60,6 +81,13 @@ pub fn bits(part: &str) -> Option<Vec<String>> {
         (b..=a).rev().collect()
     };
     Some(n.into_iter().map(|i| format!("{name}{i}")).collect())
+}
+
+/// Whether a group with this prefix can be a harness: it needs a name, and one without KiCad's
+/// markup (`PCIe_{C1x1}`), as KiCad's importer tells harness ports apart by the text before the
+/// first brace
+fn harnessable(prefix: &str) -> bool {
+    !prefix.is_empty() && !prefix.contains(['{', '}'])
 }
 
 /// The net KiCad gives a group member: `PREFIX.MEMBER`, or the member alone without a prefix
@@ -220,7 +248,7 @@ pub fn plan(
     for (li, l) in sch.labels.iter().enumerate() {
         let text = expand(&l.text);
         // A group without a prefix has no name for its harness: left as KiCad drew it
-        let Some((prefix, members)) = group(&text).filter(|g| !g.0.is_empty()) else {
+        let Some((prefix, members)) = group(&text).filter(|g| harnessable(&g.0)) else {
             continue;
         };
         let Some(n) = net_of(&mut parent, l.at) else {
@@ -245,7 +273,7 @@ pub fn plan(
     for (si, s) in sch.sheets.iter().enumerate() {
         for (pi, pin) in s.pins.iter().enumerate() {
             let text = expand(&pin.name);
-            let Some((prefix, members)) = group(&text).filter(|g| !g.0.is_empty()) else {
+            let Some((prefix, members)) = group(&text).filter(|g| harnessable(&g.0)) else {
                 continue;
             };
             let t = harness_type(&pin.name, &members, aliases);
@@ -391,6 +419,9 @@ mod tests {
         assert!(group("~{CS}").is_none());
         assert!(group("D[0..7]").is_none());
         assert_eq!(member_net("ETH", "TRD0_N"), "ETH.TRD0_N");
+        let (p, m) = group("{DDR4-PS.A[1..0] DDR4-PS.CKE}").unwrap();
+        assert_eq!(p, "DDR4-PS");
+        assert_eq!(m, vec!["A1", "A0", "CKE"]);
         let (p, m) = group("SWD_TRG{~{RESET}, SWDIO, SWDCLK}").unwrap();
         assert_eq!(p, "SWD_TRG");
         assert_eq!(m, vec!["~{RESET}", "SWDIO", "SWDCLK"]);

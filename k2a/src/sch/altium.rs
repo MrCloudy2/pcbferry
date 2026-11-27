@@ -872,10 +872,10 @@ impl Out<'_> {
         let labels_of = |m: &String| -> Vec<String> {
             names
                 .iter()
+                // Only members the sheet names: a new label would name the net here instead
+                // of where KiCad names it
                 .filter(|(p, ms)| {
-                    ms.contains(m)
-                        && (self.local_names.contains(&super::harness::member_net(p, m))
-                            || names.len() == 1)
+                    ms.contains(m) && self.local_names.contains(&super::harness::member_net(p, m))
                 })
                 .map(|(p, _)| super::harness::member_net(p, m))
                 .collect()
