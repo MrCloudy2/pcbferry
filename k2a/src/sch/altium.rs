@@ -712,25 +712,6 @@ impl Out<'_> {
                 self.push(p);
             }
             LabelKind::Global | LabelKind::Hierarchical => {
-                // A harness port must not touch the bus it came on (Altium: "Harness Port placed
-                // on a bus"): it stands a grid step off the bus end, its harness on the far side
-                let shifted;
-                let l = if self.plan.connectors.contains_key(&li) {
-                    let off = 100 * MIL;
-                    let d = match l.angle {
-                        180 => P { x: -off, y: 0 },
-                        90 => P { x: 0, y: -off },
-                        270 => P { x: 0, y: off },
-                        _ => P { x: off, y: 0 },
-                    };
-                    shifted = super::kicad::Label {
-                        at: l.at + d,
-                        ..l.clone()
-                    };
-                    &shifted
-                } else {
-                    l
-                };
                 // The importer puts the label at whichever end of the port meets a wire
                 let width = crate::font::text_width(&written, l.size) + 2 * l.size;
                 // In whole 50 mil steps: a port drawn from its far end has that end on the
@@ -792,8 +773,20 @@ impl Out<'_> {
                     .num("TextFontID", 1)
                     .set("Name", l.text.as_str())
                     .set("UniqueID", unique_id(&format!("{}{:?}", l.text, l.at)));
-                if let Some(t) = self.plan.ports.get(&li) {
-                    p.set("HarnessType", t.as_str());
+                // A port on a signal harness is named by the group's prefix, its type saying
+                // the members, as Altium names harness ports (KiCad's importer reads such a
+                // port back as PREFIX{TYPE}). A port whose members leave its bus here stays
+                // as KiCad drew it, and a copy beside the sheet carries the harness
+                let prefix = super::harness::group(&l.text)
+                    .map(|g| g.0)
+                    .unwrap_or_default();
+                if let (Some(t), false) = (
+                    self.plan.ports.get(&li),
+                    self.plan.connectors.contains_key(&li),
+                ) {
+                    p.remove("Name");
+                    p.set("Name", prefix.as_str())
+                        .set("HarnessType", t.as_str());
                 }
                 self.push(p.clone());
                 if let Some(names) = self.plan.connectors.get(&li).cloned() {
@@ -819,7 +812,10 @@ impl Out<'_> {
                     ] {
                         q.remove(k);
                     }
-                    q.num("Style", if io == 3 { 3 } else { 2 })
+                    q.remove("Name");
+                    q.set("Name", prefix.as_str())
+                        .set("HarnessType", t.as_str())
+                        .num("Style", if io == 3 { 3 } else { 2 })
                         .at("Location.X", "Location.Y", at, &self.sh)
                         .set("UniqueID", unique_id(&format!("{}{:?}strip", l.text, l.at)));
                     self.push(q);
@@ -1115,7 +1111,11 @@ impl Out<'_> {
                 .num("IOType", io)
                 .num("Style", if side < 2 { 3 } else { 7 });
             if let Some(t) = self.plan.entries.get(&(sheet_no, pi)) {
-                p.set("HarnessType", t.as_str());
+                let prefix = super::harness::group(&expand_alias(&pin.name, self.aliases))
+                    .map(|g| g.0)
+                    .unwrap_or_default();
+                p.remove("Name");
+                p.set("Name", prefix).set("HarnessType", t.as_str());
             }
             self.push(p);
         }
@@ -1473,6 +1473,18 @@ pub fn convert(
         }
     }
     for (at, dir, t, members, names) in std::mem::take(&mut out.plan.bus_connectors) {
+        // A plain net label on the harness names it, so its members are PREFIX.MEMBER in
+        // Altium and in KiCad's reading of it, as KiCad named them
+        if let Some((prefix, _)) = names.first() {
+            let mut n = record(25);
+            n.num("IndexInSheet", -1)
+                .num("OwnerPartId", -1)
+                .at("Location.X", "Location.Y", at, &out.sh)
+                .num("Color", DARK)
+                .num("FontID", 1)
+                .set("Text", prefix.as_str());
+            out.push(n);
+        }
         out.connector(at, dir, &t, &members, &names);
     }
     for (a, b) in &sch.bus_entries {

@@ -219,7 +219,8 @@ pub fn plan(
     let mut nets: BTreeMap<usize, Net> = BTreeMap::new();
     for (li, l) in sch.labels.iter().enumerate() {
         let text = expand(&l.text);
-        let Some((prefix, members)) = group(&text) else {
+        // A group without a prefix has no name for its harness: left as KiCad drew it
+        let Some((prefix, members)) = group(&text).filter(|g| !g.0.is_empty()) else {
             continue;
         };
         let Some(n) = net_of(&mut parent, l.at) else {
@@ -244,7 +245,7 @@ pub fn plan(
     for (si, s) in sch.sheets.iter().enumerate() {
         for (pi, pin) in s.pins.iter().enumerate() {
             let text = expand(&pin.name);
-            let Some((prefix, members)) = group(&text) else {
+            let Some((prefix, members)) = group(&text).filter(|g| !g.0.is_empty()) else {
                 continue;
             };
             let t = harness_type(&pin.name, &members, aliases);
